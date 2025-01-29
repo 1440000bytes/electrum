@@ -86,6 +86,10 @@ class QENetwork(QObject, QtEventListener):
         self.proxySet.emit()
         self.proxyTorChanged.emit()
 
+    @event_listener
+    def on_event_tor_probed(self, *args):
+        self.proxyTorChanged.emit()
+
     def _update_status(self):
         server = str(self.network.get_parameters().server)
         if self._server != server:
@@ -134,7 +138,7 @@ class QENetwork(QObject, QtEventListener):
         if not histogram:
             histogram = [[FEERATE_DEFAULT_RELAY/1000,1]]
         # cap the histogram to a limited number of megabytes
-        bytes_limit=10*1000*1000
+        bytes_limit = 10*1000*1000
         bytes_current = 0
         capped_histogram = []
         for item in sorted(histogram, key=lambda x: x[0], reverse=True):
@@ -263,7 +267,7 @@ class QENetwork(QObject, QtEventListener):
     proxyTorChanged = pyqtSignal()
     @pyqtProperty(bool, notify=proxyTorChanged)
     def isProxyTor(self):
-        return self.network.tor_proxy
+        return bool(self.network.is_proxy_tor)
 
     @pyqtProperty('QVariant', notify=feeHistogramUpdated)
     def feeHistogram(self):

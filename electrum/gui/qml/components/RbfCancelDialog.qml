@@ -67,104 +67,90 @@ ElDialog {
                     }
 
                     Label {
-                        text: 'sat/vB'
+                        text: UI_UNIT_NAME.FEERATE_SAT_PER_VB
                         color: Material.accentColor
                     }
                 }
 
                 Label {
+                    Layout.columnSpan: 2
+                    Layout.topMargin: constants.paddingSmall
                     text: qsTr('New fee')
                     color: Material.accentColor
                 }
 
-                FormattedAmount {
-                    amount: txcanceller.fee
-                    valid: txcanceller.valid
-                }
-
-                Label {
-                    text: qsTr('New fee rate')
-                    color: Material.accentColor
-                }
-
-                RowLayout {
-                    Label {
-                        id: feeRate
-                        text: txcanceller.valid ? txcanceller.feeRate : ''
-                        font.family: FixedFont
-                    }
-
-                    Label {
-                        visible: txcanceller.valid
-                        text: 'sat/vB'
-                        color: Material.accentColor
-                    }
-                }
-
-                Label {
-                    text: qsTr('Target')
-                    color: Material.accentColor
-                }
-
-                Label {
-                    id: targetdesc
-                    text: txcanceller.target
-                }
-
-                RowLayout {
-                    Layout.columnSpan: 2
-                    Slider {
-                        id: feeslider
-                        leftPadding: constants.paddingMedium
-                        snapMode: Slider.SnapOnRelease
-                        stepSize: 1
-                        from: 0
-                        to: txcanceller.sliderSteps
-                        onValueChanged: {
-                            if (activeFocus)
-                                txcanceller.sliderPos = value
-                        }
-                        Component.onCompleted: {
-                            value = txcanceller.sliderPos
-                        }
-                        Connections {
-                            target: txcanceller
-                            function onSliderPosChanged() {
-                                feeslider.value = txcanceller.sliderPos
-                            }
-                        }
-                    }
-
-                    FeeMethodComboBox {
-                        id: target
-                        feeslider: txcanceller
-                    }
-                }
-
-                Label {
+                TextHighlightPane {
                     Layout.columnSpan: 2
                     Layout.fillWidth: true
+                    height: feepicker.height
+
+                    FeePicker {
+                        id: feepicker
+                        width: parent.width
+                        finalizer: dialog.txcanceller
+
+                    }
+                }
+
+                InfoTextArea {
+                    Layout.columnSpan: 2
+                    Layout.preferredWidth: parent.width * 3/4
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: constants.paddingLarge
+                    iconStyle: InfoTextArea.IconStyle.Warn
                     visible: txcanceller.warning != ''
                     text: txcanceller.warning
                 }
 
-                Label {
-                    visible: txcanceller.valid
-                    text: qsTr('Outputs')
+                ToggleLabel {
+                    id: inputs_label
                     Layout.columnSpan: 2
+                    Layout.topMargin: constants.paddingMedium
+
+                    visible: txcanceller.valid
+                    labelText: qsTr('Inputs (%1)').arg(txcanceller.inputs.length)
                     color: Material.accentColor
                 }
 
                 Repeater {
-                    model: txcanceller.valid ? txcanceller.outputs : []
-                    delegate:  TxOutput {
+                    model: inputs_label.collapsed || !inputs_label.visible
+                        ? undefined
+                        : txcanceller.inputs
+                    delegate: TxInput {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+
+                        idx: index
+                        model: modelData
+                    }
+                }
+
+                ToggleLabel {
+                    id: outputs_label
+                    Layout.columnSpan: 2
+                    Layout.topMargin: constants.paddingMedium
+
+                    visible: txcanceller.valid
+                    labelText: qsTr('Outputs (%1)').arg(txcanceller.outputs.length)
+                    color: Material.accentColor
+                }
+
+                Repeater {
+                    model: outputs_label.collapsed || !outputs_label.visible
+                        ? undefined
+                        : txcanceller.outputs
+                    delegate: TxOutput {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
 
                         allowShare: false
+                        allowClickAddress: false
+
+                        idx: index
                         model: modelData
                     }
                 }
+
             }
         }
 

@@ -12,6 +12,8 @@ from electrum.logging import get_logger
 from electrum.transaction import PartialTxOutput, PartialTransaction
 from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates, profiler, get_asyncio_loop
 
+from electrum.gui import messages
+
 from .auth import AuthMixin, auth_protect
 from .qetypes import QEAmount
 from .qewallet import QEWallet
@@ -384,13 +386,15 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
                 self.canCancel = True
                 txid = fut.result()
                 try:  # swaphelper might be destroyed at this point
-                    self.userinfo = ' '.join([
-                        _('Success!'),
-                        _('Your funding transaction has been broadcast.'),
-                        _('The swap will be finalized once your transaction is confirmed.'),
-                        _('You will need to be online to finalize the swap, or the transaction will be refunded to you after some delay.'),
-                    ])
-                    self.state = QESwapHelper.State.Success
+                    if txid:
+                        self.userinfo = ' '.join([
+                            _('Success!'),
+                            messages.MSG_FORWARD_SWAP_FUNDING_MEMPOOL,
+                        ])
+                        self.state = QESwapHelper.State.Success
+                    else:
+                        self.userinfo = _('Swap failed!')
+                        self.state = QESwapHelper.State.Failed
                 except RuntimeError:
                     pass
             except concurrent.futures.CancelledError:
@@ -459,9 +463,7 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
                     if txid:
                         self.userinfo = ' '.join([
                             _('Success!'),
-                            _('The funding transaction has been detected.'),
-                            _('Your claiming transaction will be broadcast when the funding transaction is confirmed.'),
-                            _('You may choose to broadcast it earlier, although that would not be trustless.'),
+                            messages.MSG_REVERSE_SWAP_FUNDING_MEMPOOL,
                         ])
                         self.state = QESwapHelper.State.Success
                     else:

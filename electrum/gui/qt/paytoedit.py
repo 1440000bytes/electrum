@@ -26,10 +26,10 @@
 from functools import partial
 from typing import Optional, TYPE_CHECKING
 
-from PyQt5.QtCore import Qt, QTimer, QSize
-from PyQt5.QtCore import QObject, pyqtSignal
-from PyQt5.QtGui import QFontMetrics, QFont
-from PyQt5.QtWidgets import QApplication, QTextEdit, QWidget, QLineEdit, QStackedLayout, QSizePolicy
+from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QFontMetrics, QFont
+from PyQt6.QtWidgets import QApplication, QTextEdit, QWidget, QLineEdit, QStackedLayout, QSizePolicy
 
 from electrum.payment_identifier import PaymentIdentifier
 from electrum.logging import Logger
@@ -85,7 +85,7 @@ class ResizingTextEdit(QTextEdit):
         h = min(max(h, self.heightMin), self.heightMax)
         self.setMinimumHeight(int(h))
         self.setMaximumHeight(int(h))
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.verticalScrollBar().setHidden(docHeight + self.verticalMargins < self.heightMax)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.resized.emit()
@@ -129,6 +129,7 @@ class PayToEdit(QWidget, Logger, GenericInputHandler):
         self.line_edit = QLineEdit()
         self.line_edit.textChanged.connect(line_edit_changed)
         self.text_edit = ResizingTextEdit()
+        self.text_edit.setTabChangesFocus(True)
         self.text_edit.textReallyChanged.connect(text_edit_changed)
         self.text_edit.resized.connect(text_edit_resized)
 
@@ -140,6 +141,7 @@ class PayToEdit(QWidget, Logger, GenericInputHandler):
         self.multiline = False
 
         self._is_paytomany = False
+        self.line_edit.setFont(QFont(MONOSPACE_FONT))
         self.text_edit.setFont(QFont(MONOSPACE_FONT))
         self.send_tab = send_tab
         self.config = send_tab.config
@@ -197,7 +199,7 @@ class PayToEdit(QWidget, Logger, GenericInputHandler):
             self.line_edit.setText(text)
             self.text_edit.setText(text)
 
-    def setFocus(self, reason=None) -> None:
+    def setFocus(self, reason=Qt.FocusReason.OtherFocusReason) -> None:
         if self.multiline:
             self.text_edit.setFocus(reason)
         else:

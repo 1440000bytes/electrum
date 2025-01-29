@@ -5,18 +5,17 @@
 import os
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QLabel, QVBoxLayout, QGridLayout,
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QLabel, QVBoxLayout, QGridLayout,
                              QHBoxLayout, QPushButton, QWidget, QStackedWidget)
 
-from electrum import keystore
 from electrum.plugin import run_hook
 from electrum.i18n import _
 from electrum.wallet import Multisig_Wallet
 
 from .qrtextedit import ShowQRTextEdit
-from .util import (read_QIcon, WindowModalDialog, ChoicesLayout, Buttons,
-                   WWLabel, CloseButton, HelpButton, font_height, ShowQRLineEdit)
+from .util import (read_QIcon, WindowModalDialog, Buttons,
+                   WWLabel, CloseButton, HelpButton, font_height, ShowQRLineEdit, ChoiceWidget)
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
@@ -36,9 +35,7 @@ class WalletInfoDialog(WindowModalDialog):
         seed_available = _('False')
         if wallet.has_seed():
             seed_available = _('True')
-            ks = wallet.keystore
-            assert isinstance(ks, keystore.Deterministic_KeyStore)
-            seed_available += f" ({ks.get_seed_type()})"
+            seed_available += f" ({wallet.get_seed_type()})"
         keystore_types = [k.get_type_text() for k in wallet.get_keystores()]
         grid = QGridLayout()
         basename = os.path.basename(wallet.storage.path)
@@ -74,13 +71,13 @@ class WalletInfoDialog(WindowModalDialog):
                 label = IconLabel(text='Enabled, non-recoverable channels')
                 label.setIcon(read_QIcon('cloud_no'))
                 grid.addWidget(label, cur_row, 1)
-                if wallet.db.get('seed_type') == 'segwit':
+                if wallet.get_seed_type() == 'segwit':
                     msg = _("Your channels cannot be recovered from seed, because they were created with an old version of Electrum. "
-                            "This means that you must save a backup of your wallet everytime you create a new channel.\n\n"
+                            "This means that you must save a backup of your wallet every time you create a new channel.\n\n"
                             "If you want this wallet to have recoverable channels, you must close your existing channels and restore this wallet from seed")
                 else:
                     msg = _("Your channels cannot be recovered from seed. "
-                            "This means that you must save a backup of your wallet everytime you create a new channel.\n\n"
+                            "This means that you must save a backup of your wallet every time you create a new channel.\n\n"
                             "If you want to have recoverable channels, you must create a new wallet with an Electrum seed")
                 grid.addWidget(HelpButton(msg), cur_row, 3)
             cur_row += 1
@@ -120,11 +117,11 @@ class WalletInfoDialog(WindowModalDialog):
                     else:
                         return _("keystore") + f' {idx+1}'
 
-                labels = [label(idx, ks) for idx, ks in enumerate(wallet.get_keystores())]
+                labels = [(idx, label(idx, ks)) for idx, ks in enumerate(wallet.get_keystores())]
 
-                on_click = lambda clayout: select_ks(clayout.selected_index())
-                labels_clayout = ChoicesLayout(_("Select keystore"), labels, on_click)
-                vbox.addLayout(labels_clayout.layout())
+                keystore_choice = ChoiceWidget(message=_("Select keystore"), choices=labels)
+                keystore_choice.itemSelected.connect(lambda x: select_ks(x))
+                vbox.addWidget(keystore_choice)
 
             for ks in keystores:
                 ks_w = QWidget()
@@ -143,7 +140,7 @@ class WalletInfoDialog(WindowModalDialog):
                 der_path_hbox.setContentsMargins(0, 0, 0, 0)
                 der_path_hbox.addWidget(WWLabel(_("Derivation path") + ':'))
                 der_path_text = WWLabel(ks.get_derivation_prefix() or _("unknown"))
-                der_path_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                der_path_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 der_path_hbox.addWidget(der_path_text)
                 der_path_hbox.addStretch()
                 ks_vbox.addLayout(der_path_hbox)
@@ -152,7 +149,7 @@ class WalletInfoDialog(WindowModalDialog):
                 bip32fp_hbox.setContentsMargins(0, 0, 0, 0)
                 bip32fp_hbox.addWidget(QLabel("BIP32 root fingerprint:"))
                 bip32fp_text = WWLabel(ks.get_root_fingerprint() or _("unknown"))
-                bip32fp_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                bip32fp_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 bip32fp_hbox.addWidget(bip32fp_text)
                 bip32fp_hbox.addStretch()
                 ks_vbox.addLayout(bip32fp_hbox)
@@ -163,8 +160,11 @@ class WalletInfoDialog(WindowModalDialog):
             vbox.addWidget(ks_stack)
 
         vbox.addStretch(1)
-        btn_export_info = run_hook('wallet_info_buttons', self, self)
+        btn_export_info = run_hook('wallet_info_buttons', window, self)
+        if btn_export_info is None:
+            btn_export_info = []
+
         btn_close = CloseButton(self)
-        btns = Buttons(btn_export_info, btn_close)
+        btns = Buttons(*btn_export_info, btn_close)
         vbox.addLayout(btns)
         self.setLayout(vbox)

@@ -31,6 +31,7 @@ import urllib.parse
 
 import certifi
 import aiohttp
+import electrum_ecc as ecc
 
 
 try:
@@ -38,7 +39,7 @@ try:
 except ImportError:
     sys.exit("Error: could not find paymentrequest_pb2.py. Create it with 'contrib/generate_payreqpb2.sh'")
 
-from . import bitcoin, constants, ecc, util, transaction, x509, rsakey
+from . import bitcoin, constants, util, transaction, x509, rsakey
 from .util import bfh, make_aiohttp_session, error_text_bytes_to_safe_str, get_running_loop
 from .invoices import Invoice, get_id_from_onchain_outputs
 from .crypto import sha256
@@ -235,7 +236,7 @@ class PaymentRequest:
             address = info.get('address')
             pr.signature = b''
             message = pr.SerializeToString()
-            if ecc.verify_message_with_address(address, sig, message):
+            if bitcoin.verify_usermessage_with_address(address, sig, message):
                 self._verified_success_msg = 'Verified with DNSSEC'
                 self._verified_success = True
                 return True
@@ -291,7 +292,7 @@ class PaymentRequest:
         paymnt.merchant_data = pay_det.merchant_data
         paymnt.transactions.append(bfh(raw_tx))
         ref_out = paymnt.refund_to.add()
-        ref_out.script = util.bfh(address_to_script(refund_addr))
+        ref_out.script = address_to_script(refund_addr)
         paymnt.memo = "Paid using Electrum"
         pm = paymnt.SerializeToString()
         payurl = urllib.parse.urlparse(pay_det.payment_url)
@@ -334,7 +335,7 @@ def make_unsigned_request(req: 'Invoice'):
     if amount is None:
         amount = 0
     memo = req.message
-    script = bfh(address_to_script(addr))
+    script = address_to_script(addr)
     outputs = [(script, amount)]
     pd = pb2.PaymentDetails()
     if constants.net.TESTNET:
@@ -356,7 +357,7 @@ def sign_request_with_alias(pr, alias, alias_privkey):
     message = pr.SerializeToString()
     ec_key = ecc.ECPrivkey(alias_privkey)
     compressed = bitcoin.is_compressed_privkey(alias_privkey)
-    pr.signature = ec_key.sign_message(message, compressed)
+    pr.signature = bitcoin.ecdsa_sign_usermessage(ec_key, message, is_compressed=compressed)
 
 
 def verify_cert_chain(chain):

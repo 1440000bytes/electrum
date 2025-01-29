@@ -1,6 +1,7 @@
 from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject
 
 from electrum.logging import get_logger
+from electrum.util import UserFacingException
 
 from .auth import auth_protect, AuthMixin
 from .qetransactionlistmodel import QETransactionListModel
@@ -12,6 +13,7 @@ class QEAddressDetails(AuthMixin, QObject):
     _logger = get_logger(__name__)
 
     detailsChanged = pyqtSignal()
+    addressDeleteFailed = pyqtSignal([str], arguments=['message'])
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,7 +86,6 @@ class QEAddressDetails(AuthMixin, QObject):
     def canDelete(self):
         return self._candelete
 
-
     frozenChanged = pyqtSignal()
     @pyqtProperty(bool, notify=frozenChanged)
     def isFrozen(self):
@@ -126,15 +127,22 @@ class QEAddressDetails(AuthMixin, QObject):
     def retrieve_private_key(self):
         try:
             self._privkey = self._wallet.wallet.export_private_key(self._address, self._wallet.password)
-        except Exception:
+        except Exception as e:
+            self._logger.error(f'problem retrieving privkey: {str(e)}')
             self._privkey = ''
 
         self.detailsChanged.emit()
 
-    @pyqtSlot()
+    @pyqtSlot(result=bool)
     def deleteAddress(self):
         assert self.canDelete
-        self._wallet.wallet.delete_address(self._address)
+        try:
+            self._wallet.wallet.delete_address(self._address)
+            self._wallet.historyModel.setDirty()
+        except UserFacingException as e:
+            self.addressDeleteFailed.emit(str(e))
+            return False
+        return True
 
     def update(self):
         if self._wallet is None:

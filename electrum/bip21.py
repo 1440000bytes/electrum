@@ -43,6 +43,9 @@ def parse_bip21_URI(uri: str) -> dict:
     for k, v in pq.items():
         if len(v) != 1:
             raise InvalidBitcoinURI(f'Duplicate Key: {repr(k)}')
+        if k.startswith('req-'):
+            # we have no support for any req-* query parameters
+            raise InvalidBitcoinURI(f'Unsupported Key: {repr(k)}')
 
     out = {k: v[0] for k, v in pq.items()}
     if address:
@@ -58,7 +61,7 @@ def parse_bip21_URI(uri: str) -> dict:
                 amount = Decimal(m.group(1)) * pow(Decimal(10), k)
             else:
                 amount = Decimal(am) * COIN
-            if amount > TOTAL_COIN_SUPPLY_LIMIT_IN_BTC * COIN:
+            if amount > TOTAL_COIN_SUPPLY_LIMIT_IN_BTC * COIN or amount <= 0:
                 raise InvalidBitcoinURI(f"amount is out-of-bounds: {amount!r} BTC")
             out['amount'] = int(amount)
         except Exception as e:
@@ -89,7 +92,7 @@ def parse_bip21_URI(uri: str) -> dict:
         amount_sat = out.get('amount')
         if amount_sat:
             # allow small leeway due to msat precision
-            if abs(amount_sat - int(lnaddr.get_amount_sat())) > 1:
+            if lnaddr.get_amount_sat() is None or abs(amount_sat - int(lnaddr.get_amount_sat())) > 1:
                 raise InvalidBitcoinURI("Inconsistent lightning field in bip21: amount")
         address = out.get('address')
         ln_fallback_addr = lnaddr.get_fallback_address()

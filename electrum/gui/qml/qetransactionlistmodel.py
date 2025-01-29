@@ -81,6 +81,11 @@ class QETransactionListModel(QAbstractListModel, QtEventListener):
             roles = [self._ROLE_RMAP['date']]
             self.dataChanged.emit(index, index, roles)
 
+    @qt_event_listener
+    def on_event_labels_received(self, wallet, labels):
+        if wallet == self.wallet:
+            self.initModel(True)  # TODO: be less dramatic
+
     def rowCount(self, index):
         return len(self.tx_history)
 
@@ -231,7 +236,7 @@ class QETransactionListModel(QAbstractListModel, QtEventListener):
                 tx['timestamp'] = info.timestamp
                 tx['section'] = self.get_section_by_timestamp(info.timestamp)
                 tx['date'] = self.format_date_by_section(tx['section'], datetime.fromtimestamp(info.timestamp))
-                index = self.index(i,0)
+                index = self.index(i, 0)
                 roles = [self._ROLE_RMAP[x] for x in ['section', 'height', 'confirmations', 'timestamp', 'date']]
                 self.dataChanged.emit(index, index, roles)
                 return
@@ -259,7 +264,7 @@ class QETransactionListModel(QAbstractListModel, QtEventListener):
         for i, tx in enumerate(self.tx_history):
             if tx['key'] == key:
                 tx['label'] = label
-                index = self.index(i,0)
+                index = self.index(i, 0)
                 self.dataChanged.emit(index, index, [self._ROLE_RMAP['label']])
                 return
 
@@ -270,7 +275,7 @@ class QETransactionListModel(QAbstractListModel, QtEventListener):
             if 'height' in tx_item:
                 if tx_item['height'] > 0:
                     tx_item['confirmations'] = height - tx_item['height'] + 1
-                    index = self.index(i,0)
+                    index = self.index(i, 0)
                     roles = [self._ROLE_RMAP['confirmations']]
                     self.dataChanged.emit(index, index, roles)
                 elif tx_item['height'] in (TX_HEIGHT_FUTURE, TX_HEIGHT_LOCAL):

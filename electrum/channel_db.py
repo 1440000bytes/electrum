@@ -36,16 +36,18 @@ from enum import IntEnum
 import functools
 
 from aiorpcx import NetAddress
+import electrum_ecc as ecc
+from electrum_ecc import ECPubkey
 
 from .sql_db import SqlDB, sql
 from . import constants, util
 from .util import profiler, get_headers_dir, is_ip_address, json_normalize, UserFacingException
 from .logging import Logger
-from .lnutil import (LNPeerAddr, format_short_channel_id, ShortChannelID,
+from .lntransport import LNPeerAddr
+from .lnutil import (format_short_channel_id, ShortChannelID,
                      validate_features, IncompatibleOrInsaneFeatures, InvalidGossipMsg)
 from .lnverifier import LNChannelVerifier, verify_sig_for_channel_update
 from .lnmsg import decode_msg
-from . import ecc
 from .crypto import sha256d
 from .lnmsg import FailedToParseMsg
 
@@ -321,6 +323,7 @@ class ChannelDB(SqlDB):
         self.lock = threading.RLock()
         self.num_nodes = 0
         self.num_channels = 0
+        self.num_policies = 0
         self._channel_updates_for_private_channels = {}  # type: Dict[Tuple[bytes, bytes], Tuple[dict, int]]
         # note: ^ we could maybe move this cache into PaySession instead of being global.
         #       That would only make sense though if PaySessions were never too short
@@ -604,7 +607,7 @@ class ChannelDB(SqlDB):
         pubkeys = [payload['node_id_1'], payload['node_id_2'], payload['bitcoin_key_1'], payload['bitcoin_key_2']]
         sigs = [payload['node_signature_1'], payload['node_signature_2'], payload['bitcoin_signature_1'], payload['bitcoin_signature_2']]
         for pubkey, sig in zip(pubkeys, sigs):
-            if not ecc.verify_signature(pubkey, sig, h):
+            if not ECPubkey(pubkey).ecdsa_verify(sig, h):
                 raise InvalidGossipMsg('signature failed')
 
     @classmethod
@@ -612,7 +615,7 @@ class ChannelDB(SqlDB):
         pubkey = payload['node_id']
         signature = payload['signature']
         h = sha256d(payload['raw'][66:])
-        if not ecc.verify_signature(pubkey, signature, h):
+        if not ECPubkey(pubkey).ecdsa_verify(signature, h):
             raise InvalidGossipMsg('signature failed')
 
     def add_node_announcements(self, msg_payloads):

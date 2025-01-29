@@ -69,11 +69,11 @@ Pane {
                 Label {
                     text: qsTr('Server Height:');
                     color: Material.accentColor
-                    visible: Network.serverHeight != 0 && Network.serverHeight < Network.height
+                    visible: Network.serverHeight != 0 && Network.serverHeight != Network.height
                 }
                 Label {
-                    text: Network.serverHeight + " (lagging)"
-                    visible: Network.serverHeight != 0 && Network.serverHeight < Network.height
+                    text: Network.serverHeight + " " + (Network.serverHeight < Network.height ? "(lagging)" : "(syncing...)")
+                    visible: Network.serverHeight != 0 && Network.serverHeight != Network.height
                 }
                 Heading {
                     Layout.columnSpan: 2
@@ -100,7 +100,10 @@ Pane {
                                     Layout.fillWidth: true
                                     height: parent.height
                                     color: Qt.hsva(2/3-(2/3*(Math.log(Math.min(600, modelData[0]))/Math.log(600))), 0.8, 1, 1)
-                                    ToolTip.text: modelData[0] + " sat/vB around depth " + (modelData[2]/1000000).toFixed(2) + " MB"
+                                    ToolTip.text: (qsTr("%1 around depth %2")
+                                        .arg(modelData[0] + " " + UI_UNIT_NAME.FEERATE_SAT_PER_VB)
+                                        .arg((modelData[2]/1000000).toFixed(2) + " " + UI_UNIT_NAME.MEMPOOL_MB)
+                                    )
                                     ToolTip.visible: ma.containsMouse
                                     MouseArea {
                                         id: ma
@@ -144,14 +147,14 @@ Pane {
                         RowLayout {
                             Layout.fillWidth: true
                             Label {
-                                text: '<-- ' + qsTr('%1 sat/vB').arg(Math.ceil(Network.feeHistogram.max_fee))
+                                text: '<-- ' + Math.ceil(Network.feeHistogram.max_fee) + " " + UI_UNIT_NAME.FEERATE_SAT_PER_VB
                                 font.pixelSize: constants.fontSizeXSmall
                                 color: Material.accentColor
                             }
                             Label {
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignRight
-                                text: qsTr('%1 sat/vB').arg(Math.floor(Network.feeHistogram.min_fee)) + ' -->'
+                                text: Math.floor(Network.feeHistogram.min_fee) + " " + UI_UNIT_NAME.FEERATE_SAT_PER_VB + ' -->'
                                 font.pixelSize: constants.fontSizeXSmall
                                 color: Material.accentColor
                             }
@@ -205,7 +208,7 @@ Pane {
                     color: Material.accentColor
                 }
                 Label {
-                    text: 'mode' in Network.proxy ? qsTr('enabled') : qsTr('none')
+                    text: 'mode' in Network.proxy ? qsTr('enabled') : qsTr('disabled')
                 }
 
                 Label {

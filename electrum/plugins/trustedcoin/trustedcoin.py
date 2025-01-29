@@ -27,20 +27,22 @@ import json
 import time
 import hashlib
 from typing import Dict, Union, Sequence, List, TYPE_CHECKING
-
 from urllib.parse import urljoin
 from urllib.parse import quote
+
 from aiohttp import ClientResponse
 
-from electrum import ecc, constants, keystore, version, bip32, bitcoin
-from electrum.bip32 import BIP32Node, xpub_type
+import electrum_ecc as ecc
+
+from electrum import constants, keystore, version, bip32, bitcoin
+from electrum.bip32 import BIP32Node, xpub_type, is_xprv
 from electrum.crypto import sha256
 from electrum.transaction import PartialTxOutput, PartialTxInput, PartialTransaction, Transaction
-from electrum.mnemonic import Mnemonic, seed_type, is_any_2fa_seed_type
+from electrum.mnemonic import Mnemonic, calc_seed_type, is_any_2fa_seed_type
 from electrum.wallet import Multisig_Wallet, Deterministic_Wallet
 from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
-from electrum.util import NotEnoughFunds, UserFacingException
+from electrum.util import NotEnoughFunds, UserFacingException, error_text_str_to_safe_str
 from electrum.network import Network
 from electrum.logging import Logger
 
@@ -103,8 +105,14 @@ RESTORE_MSG = _("Enter the seed for your 2-factor wallet:")
 
 
 class TrustedCoinException(Exception):
-    def __init__(self, message, status_code=0):
-        Exception.__init__(self, message)
+    def __init__(self, message, *, status_code=0):
+        # note: 'message' is arbitrary text coming from the server
+        safer_message = (
+            f"Received error from 2FA server\n"
+            f"[DO NOT TRUST THIS MESSAGE]:\n\n"
+            f"status_code={status_code}\n\n"
+            f"{error_text_str_to_safe_str(message)}")
+        Exception.__init__(self, safer_message)
         self.status_code = status_code
 
 
@@ -134,7 +142,7 @@ class TrustedCoinCosignerClient(Logger):
                 message = r['message']
             except Exception:
                 message = await resp.text()
-            raise TrustedCoinException(message, resp.status)
+            raise TrustedCoinException(message, status_code=resp.status)
         try:
             return await resp.json()
         except Exception:
@@ -217,7 +225,7 @@ class TrustedCoinCosignerClient(Logger):
 
     def reset_auth(self, id, challenge, signatures):
         """ Reset Google Auth secret """
-        payload = {'challenge':challenge, 'signatures':signatures}
+        payload = {'challenge': challenge, 'signatures': signatures}
         return self.send_request('post', 'cosigner/%s/otp_secret' % quote(id), payload)
 
     def sign(self, id, transaction, otp):
@@ -233,27 +241,6 @@ class TrustedCoinCosignerClient(Logger):
         }
         return self.send_request('post', 'cosigner/%s/sign' % quote(id), payload,
                                  timeout=60)
-
-    def transfer_credit(self, id, recipient, otp, signature_callback):
-        """
-        Transfer a cosigner's credits to another cosigner.
-        :param id: the id of the sending cosigner
-        :param recipient: the id of the recipient cosigner
-        :param otp: the one time password (of the sender)
-        :param signature_callback: a callback that signs a text message using xpubkey1/0/0 returning a compact sig
-        """
-        payload = {
-            'otp': otp,
-            'recipient': recipient,
-            'timestamp': int(time.time()),
-
-        }
-        relative_url = 'cosigner/%s/transfer' % quote(id)
-        full_url = urljoin(self.base_url, relative_url)
-        headers = {
-            'x-signature': signature_callback(full_url + '\n' + json.dumps(payload))
-        }
-        return self.send_request('post', relative_url, payload, headers)
 
 
 server = TrustedCoinCosignerClient(user_agent="Electrum/" + version.ELECTRUM_VERSION)
@@ -320,15 +307,13 @@ class Wallet_2fa(Multisig_Wallet):
 
     def make_unsigned_transaction(
             self, *,
-            coins: Sequence[PartialTxInput],
             outputs: List[PartialTxOutput],
-            fee=None,
-            change_addr: str = None,
             is_sweep=False,
-            rbf=False) -> PartialTransaction:
+            **kwargs,
+    ) -> PartialTransaction:
 
         mk_tx = lambda o: Multisig_Wallet.make_unsigned_transaction(
-            self, coins=coins, outputs=o, fee=fee, change_addr=change_addr, rbf=rbf)
+            self, outputs=o, **kwargs)
         extra_fee = self.extra_fee() if not is_sweep else 0
         if extra_fee:
             address = self.billing_info['billing_address_segwit']
@@ -393,8 +378,6 @@ class Wallet_2fa(Multisig_Wallet):
         self._billing_addresses[addr_type] = billing_addresses_of_this_type
         self.db.put('trustedcoin_billing_addresses', self._billing_addresses['legacy'])
         self.db.put('trustedcoin_billing_addresses_segwit', self._billing_addresses['segwit'])
-        # FIXME this often runs in a daemon thread, where storage.write will fail
-        self.db.write()
 
     def is_billing_address(self, addr: str) -> bool:
         return addr in self._billing_addresses_set
@@ -437,6 +420,15 @@ def make_billing_address(wallet, num, addr_type):
         raise ValueError(f'unexpected billing type: {addr_type}')
 
 
+def finish_requesting(func):
+    def f(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            self.requesting = False
+    return f
+
+
 class TrustedCoinPlugin(BasePlugin):
     wallet_class = Wallet_2fa
     disclaimer_msg = DISCLAIMER
@@ -445,11 +437,6 @@ class TrustedCoinPlugin(BasePlugin):
         BasePlugin.__init__(self, parent, config, name)
         self.wallet_class.plugin = self
         self.requesting = False
-
-    @staticmethod
-    def is_valid_seed(seed):
-        t = seed_type(seed)
-        return is_any_2fa_seed_type(t)
 
     def is_available(self):
         return True
@@ -471,9 +458,11 @@ class TrustedCoinPlugin(BasePlugin):
         if not wallet.keystores['x3'].can_sign(tx, ignore_watching_only=True):
             self.logger.info("twofactor: xpub3 not needed")
             return
+
         def wrapper(tx):
             assert tx
             self.prompt_user_for_otp(wallet, tx, on_success, on_failure)
+
         return wrapper
 
     def prompt_user_for_otp(self, wallet, tx, on_success, on_failure) -> None:
@@ -481,19 +470,11 @@ class TrustedCoinPlugin(BasePlugin):
 
     @hook
     def get_tx_extra_fee(self, wallet, tx: Transaction):
-        if type(wallet) != Wallet_2fa:
+        if type(wallet) is not Wallet_2fa:
             return
         for o in tx.outputs():
             if wallet.is_billing_address(o.address):
                 return o.address, o.value
-
-    def finish_requesting(func):
-        def f(self, *args, **kwargs):
-            try:
-                return func(self, *args, **kwargs)
-            finally:
-                self.requesting = False
-        return f
 
     @finish_requesting
     def request_billing_info(self, wallet: 'Wallet_2fa', *, suppress_connection_error=True):
@@ -539,7 +520,7 @@ class TrustedCoinPlugin(BasePlugin):
 
     def make_seed(self, seed_type):
         if not is_any_2fa_seed_type(seed_type):
-            raise Exception(f'unexpected seed type: {seed_type}')
+            raise Exception(f'unexpected seed type: {seed_type!r}')
         return Mnemonic('english').make_seed(seed_type=seed_type)
 
     @hook
@@ -547,19 +528,19 @@ class TrustedCoinPlugin(BasePlugin):
         window.wallet.is_billing = False
 
     @classmethod
-    def get_xkeys(self, seed, t, passphrase, derivation):
+    def get_xkeys(cls, seed, t, passphrase, derivation):
         assert is_any_2fa_seed_type(t)
         xtype = 'standard' if t == '2fa' else 'p2wsh'
-        bip32_seed = Mnemonic.mnemonic_to_seed(seed, passphrase)
+        bip32_seed = Mnemonic.mnemonic_to_seed(seed, passphrase=passphrase)
         rootnode = BIP32Node.from_rootseed(bip32_seed, xtype=xtype)
         child_node = rootnode.subkey_at_private_derivation(derivation)
         return child_node.to_xprv(), child_node.to_xpub()
 
     @classmethod
-    def xkeys_from_seed(self, seed, passphrase):
-        t = seed_type(seed)
+    def xkeys_from_seed(cls, seed, passphrase):
+        t = calc_seed_type(seed)
         if not is_any_2fa_seed_type(t):
-            raise Exception(f'unexpected seed type: {t}')
+            raise Exception(f'unexpected seed type: {t!r}')
         words = seed.split()
         n = len(words)
         if t == '2fa':
@@ -567,20 +548,20 @@ class TrustedCoinPlugin(BasePlugin):
                 # note: pre-2.7 2fa seeds were typically 24-25 words, however they
                 # could probabilistically be arbitrarily shorter due to a bug. (see #3611)
                 # the probability of it being < 20 words is about 2^(-(256+12-19*11)) = 2^(-59)
-                if passphrase != '':
-                    raise Exception('old 2fa seed cannot have passphrase')
-                xprv1, xpub1 = self.get_xkeys(' '.join(words[0:12]), t, '', "m/")
-                xprv2, xpub2 = self.get_xkeys(' '.join(words[12:]), t, '', "m/")
+                if passphrase:
+                    raise Exception("old '2fa'-type electrum seed cannot have passphrase")
+                xprv1, xpub1 = cls.get_xkeys(' '.join(words[0:12]), t, '', "m/")
+                xprv2, xpub2 = cls.get_xkeys(' '.join(words[12:]), t, '', "m/")
             elif n == 12:  # new scheme
-                xprv1, xpub1 = self.get_xkeys(seed, t, passphrase, "m/0'/")
-                xprv2, xpub2 = self.get_xkeys(seed, t, passphrase, "m/1'/")
+                xprv1, xpub1 = cls.get_xkeys(seed, t, passphrase, "m/0'/")
+                xprv2, xpub2 = cls.get_xkeys(seed, t, passphrase, "m/1'/")
             else:
                 raise Exception(f'unrecognized seed length for "2fa" seed: {n}')
         elif t == '2fa_segwit':
-            xprv1, xpub1 = self.get_xkeys(seed, t, passphrase, "m/0'/")
-            xprv2, xpub2 = self.get_xkeys(seed, t, passphrase, "m/1'/")
+            xprv1, xpub1 = cls.get_xkeys(seed, t, passphrase, "m/0'/")
+            xprv2, xpub2 = cls.get_xkeys(seed, t, passphrase, "m/1'/")
         else:
-            raise Exception(f'unexpected seed type: {t}')
+            raise Exception(f'unexpected seed type: {t!r}')
         return xprv1, xpub1, xprv2, xpub2
 
     @hook
@@ -596,8 +577,6 @@ class TrustedCoinPlugin(BasePlugin):
 
     # insert trustedcoin pages in new wallet wizard
     def extend_wizard(self, wizard: 'NewWalletWizard'):
-        # wizard = self._app.daemon.newWalletWizard
-        # self.logger.debug(repr(wizard))
         views = {
             'trustedcoin_start': {
                 'next': 'trustedcoin_choose_seed',
@@ -610,18 +589,22 @@ class TrustedCoinPlugin(BasePlugin):
                 'next': 'trustedcoin_confirm_seed'
             },
             'trustedcoin_confirm_seed': {
-                'next': 'trustedcoin_tos_email'
+                'next': 'trustedcoin_tos'
             },
             'trustedcoin_have_seed': {
                 'next': 'trustedcoin_keep_disable'
             },
             'trustedcoin_keep_disable': {
-                'next': lambda d: 'trustedcoin_tos_email' if d['trustedcoin_keepordisable'] != 'disable'
+                'next': lambda d: 'trustedcoin_tos' if d['trustedcoin_keepordisable'] != 'disable'
                         else 'wallet_password',
                 'accept': self.recovery_disable,
                 'last': lambda d: wizard.is_single_password() and d['trustedcoin_keepordisable'] == 'disable'
             },
-            'trustedcoin_tos_email': {
+            'trustedcoin_tos': {
+                'next': lambda d: 'trustedcoin_show_confirm_otp' if 'xprv1' not in d or is_xprv(d['xprv1'])
+                        else 'trustedcoin_keystore_unlock'
+            },
+            'trustedcoin_keystore_unlock': {
                 'next': 'trustedcoin_show_confirm_otp'
             },
             'trustedcoin_show_confirm_otp': {
@@ -634,15 +617,12 @@ class TrustedCoinPlugin(BasePlugin):
 
     # combined create_keystore and create_remote_key pre
     def create_keys(self, wizard_data):
-        # wizard = self._app.daemon.newWalletWizard
-        # wizard = self._wizard
-        # wizard_data = wizard._current.wizard_data
-
         if 'seed' not in wizard_data:
             # online continuation
             xprv1, xpub1, xprv2, xpub2 = (wizard_data['xprv1'], wizard_data['xpub1'], None, wizard_data['xpub2'])
         else:
-            xprv1, xpub1, xprv2, xpub2 = self.xkeys_from_seed(wizard_data['seed'], wizard_data['seed_extra_words'])
+            seed_extension = wizard_data['seed_extra_words'] if wizard_data['seed_extend'] else ''
+            xprv1, xpub1, xprv2, xpub2 = self.xkeys_from_seed(wizard_data['seed'], seed_extension)
 
         data = {'x1': {'xpub': xpub1}, 'x2': {'xpub': xpub2}}
 

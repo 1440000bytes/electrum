@@ -31,7 +31,9 @@ import zlib
 from enum import IntEnum
 from typing import Optional
 
-from . import ecc
+import electrum_ecc as ecc
+
+from . import crypto
 from .util import (profiler, InvalidPassword, WalletFileException, bfh, standardize_path,
                    test_read_write_permissions, os_chmod)
 
@@ -54,9 +56,14 @@ class StorageEncryptionVersion(IntEnum):
 class StorageReadWriteError(Exception): pass
 
 
+class StorageOnDiskUnexpectedlyChanged(Exception): pass
+
+
 # TODO: Rename to Storage
 class WalletStorage(Logger):
 
+    # TODO maybe split this into separate create() and open() classmethods, to prevent some bugs.
+    #      Until then, the onus is on the caller to check file_exists().
     def __init__(self, path):
         Logger.__init__(self)
         self.path = standardize_path(path)
@@ -84,22 +91,22 @@ class WalletStorage(Logger):
         return self.decrypted if self.is_encrypted() else self.raw
 
     def write(self, data: str) -> None:
-        s = self.encrypt_before_writing(data)
-        temp_path = "%s.tmp.%s" % (self.path, os.getpid())
-        with open(temp_path, "wb") as f:
-            f.write(s.encode("utf-8"))
-            self.pos = f.seek(0, os.SEEK_END)
-            f.flush()
-            os.fsync(f.fileno())
         try:
             mode = os.stat(self.path).st_mode
         except FileNotFoundError:
             mode = stat.S_IREAD | stat.S_IWRITE
+        s = self.encrypt_before_writing(data)
+        temp_path = "%s.tmp.%s" % (self.path, os.getpid())
+        with open(temp_path, "wb") as f:
+            os_chmod(temp_path, mode)  # set restrictive perms *before* we write data
+            f.write(s.encode("utf-8"))
+            self.pos = f.seek(0, os.SEEK_END)
+            f.flush()
+            os.fsync(f.fileno())
         # assert that wallet file does not exist, to prevent wallet corruption (see issue #5082)
         if not self.file_exists():
             assert not os.path.exists(self.path)
         os.replace(temp_path, self.path)
-        os_chmod(self.path, mode)
         self._file_exists = True
         self.logger.info(f"saved {self.path}")
 
@@ -108,7 +115,8 @@ class WalletStorage(Logger):
         assert not self.is_encrypted()
         with open(self.path, "rb+") as f:
             pos = f.seek(0, os.SEEK_END)
-            assert pos == self.pos, (self.pos, pos)
+            if pos != self.pos:
+                raise StorageOnDiskUnexpectedlyChanged(f"expected size {self.pos}, found {pos}")
             f.write(data.encode("utf-8"))
             self.pos = f.seek(0, os.SEEK_END)
             f.flush()
@@ -186,7 +194,7 @@ class WalletStorage(Logger):
         ec_key = self.get_eckey_from_password(password)
         if self.raw:
             enc_magic = self._get_encryption_magic()
-            s = zlib.decompress(ec_key.decrypt_message(self.raw, enc_magic))
+            s = zlib.decompress(crypto.ecies_decrypt_message(ec_key, self.raw, magic=enc_magic))
             s = s.decode('utf8')
         else:
             s = ''
@@ -201,7 +209,7 @@ class WalletStorage(Logger):
             c = zlib.compress(s, level=zlib.Z_BEST_SPEED)
             enc_magic = self._get_encryption_magic()
             public_key = ecc.ECPubkey(bfh(self.pubkey))
-            s = public_key.encrypt_message(c, enc_magic)
+            s = crypto.ecies_encrypt_message(public_key, c, magic=enc_magic)
             s = s.decode('utf8')
         return s
 

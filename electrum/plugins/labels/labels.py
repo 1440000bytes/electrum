@@ -7,6 +7,7 @@ from typing import Union, TYPE_CHECKING
 
 import base64
 
+from electrum import util
 from electrum.plugin import BasePlugin, hook
 from electrum.crypto import aes_encrypt_with_iv, aes_decrypt_with_iv
 from electrum.i18n import _
@@ -39,6 +40,7 @@ class LabelsPlugin(BasePlugin):
     def encode(self, wallet: 'Abstract_Wallet', msg: str) -> str:
         password, iv, wallet_id = self.wallets[wallet]
         encrypted = aes_encrypt_with_iv(password, iv, msg.encode('utf8'))
+        # FIXME: ^ we are reusing the IV between all labels in the wallet, in CBC mode...
         return base64.b64encode(encrypted).decode()
 
     def decode(self, wallet: 'Abstract_Wallet', message: str) -> str:
@@ -66,7 +68,9 @@ class LabelsPlugin(BasePlugin):
         if not item:
             return
         if label is None:
-            # note: the server does not know whether a label is empty
+            # note: the server should not know whether a label is empty
+            #       FIXME but it does! we are reusing the IV with AES-CBC: there is no randomness between labels,
+            #       all empty labels in given wallet look the same.
             label = ''
         nonce = self.get_nonce(wallet)
         wallet_id = self.wallets[wallet][2]
@@ -137,7 +141,7 @@ class LabelsPlugin(BasePlugin):
         if response["labels"] is None or len(response["labels"]) == 0:
             self.logger.info('no new labels')
             return
-        #self.logger.debug(f"labels received {response!r}")
+
         self.logger.info(f'received {len(response["labels"])} labels')
         result = {}
         for label in response["labels"]:
@@ -156,14 +160,14 @@ class LabelsPlugin(BasePlugin):
                 result[key] = value
 
         for key, value in result.items():
-            if force or not wallet._get_label(key):
-                wallet._set_label(key, value)
+            wallet._set_label(key, value)
 
         self.set_nonce(wallet, response["nonce"] + 1)
+        util.trigger_callback('labels_received', wallet, result)
         self.on_pulled(wallet)
 
     def on_pulled(self, wallet: 'Abstract_Wallet') -> None:
-        raise NotImplementedError()
+        pass
 
     @ignore_exceptions
     @log_exceptions

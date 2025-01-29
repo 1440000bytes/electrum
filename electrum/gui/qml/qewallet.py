@@ -3,7 +3,7 @@ import base64
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional, Any
 from functools import partial
 
 from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, QTimer
@@ -55,27 +55,24 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     dataChanged = pyqtSignal()
 
     balanceChanged = pyqtSignal()
-    requestStatusChanged = pyqtSignal([str,int], arguments=['key','status'])
+    requestStatusChanged = pyqtSignal([str, int], arguments=['key', 'status'])
     requestCreateSuccess = pyqtSignal([str], arguments=['key'])
     requestCreateError = pyqtSignal([str], arguments=['error'])
-    invoiceStatusChanged = pyqtSignal([str,int], arguments=['key','status'])
+    invoiceStatusChanged = pyqtSignal([str, int], arguments=['key', 'status'])
     invoiceCreateSuccess = pyqtSignal()
-    invoiceCreateError = pyqtSignal([str,str], arguments=['code','error'])
+    invoiceCreateError = pyqtSignal([str, str], arguments=['code', 'error'])
     paymentAuthRejected = pyqtSignal()
     paymentSucceeded = pyqtSignal([str], arguments=['key'])
-    paymentFailed = pyqtSignal([str,str], arguments=['key','reason'])
+    paymentFailed = pyqtSignal([str, str], arguments=['key', 'reason'])
     requestNewPassword = pyqtSignal()
-    signSucceeded = pyqtSignal([str], arguments=['txid'])
-    signFailed = pyqtSignal([str], arguments=['message'])
     broadcastSucceeded = pyqtSignal([str], arguments=['txid'])
-    broadcastFailed = pyqtSignal([str,str,str], arguments=['txid','code','reason'])
+    broadcastFailed = pyqtSignal([str, str, str], arguments=['txid', 'code', 'reason'])
     saveTxSuccess = pyqtSignal([str], arguments=['txid'])
-    saveTxError = pyqtSignal([str,str,str], arguments=['txid', 'code', 'message'])
+    saveTxError = pyqtSignal([str, str, str], arguments=['txid', 'code', 'message'])
     importChannelBackupFailed = pyqtSignal([str], arguments=['message'])
-    labelsUpdated = pyqtSignal()
     otpRequested = pyqtSignal()
     otpSuccess = pyqtSignal()
-    otpFailed = pyqtSignal([str,str], arguments=['code','message'])
+    otpFailed = pyqtSignal([str, str], arguments=['code', 'message'])
     peersUpdated = pyqtSignal()
     seedRetrieved = pyqtSignal()
 
@@ -103,8 +100,10 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         self._totalbalance = QEAmount()
         self._lightningcanreceive = QEAmount()
         self._lightningcansend = QEAmount()
+        self._lightningbalancefrozen = QEAmount()
 
         self._seed = ''
+        self._seed_passphrase = ''
 
         self.tx_notification_queue = queue.Queue()
         self.tx_notification_last_time = 0
@@ -161,6 +160,18 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
             self._logger.info(progress)
             self.synchronizingProgressChanged.emit()
 
+    multipleChangeChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=multipleChangeChanged)
+    def multipleChange(self):
+        return self.wallet.multiple_change
+
+    @multipleChange.setter
+    def multipleChange(self, multiple_change):
+        if self.wallet.multiple_change != multiple_change:
+            self.wallet.multiple_change = multiple_change
+            self.wallet.db.put('multiple_change', self.wallet.multiple_change)
+            self.multipleChangeChanged.emit()
+
     @qt_event_listener
     def on_event_request_status(self, wallet, key, status):
         if wallet == self.wallet:
@@ -196,10 +207,12 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
 
     @qt_event_listener
     def on_event_removed_transaction(self, wallet, tx):
+        # NOTE: this event only triggers once, only for the first deleted tx, when for imported wallets an address
+        # is deleted along with multiple associated txs
         if wallet == self.wallet:
             self._logger.info(f'removed transaction {tx.txid()}')
             self.addressCoinModel.setDirty()
-            self.historyModel.initModel(True)  # setDirty()?
+            self.historyModel.setDirty()
             self.balanceChanged.emit()
 
     @qt_event_listener
@@ -336,7 +349,9 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     billingInfoChanged = pyqtSignal()
     @pyqtProperty('QVariantMap', notify=billingInfoChanged)
     def billingInfo(self):
-        return {} if self.wallet.wallet_type != '2fa' else self.wallet.billing_info
+        if self.wallet.wallet_type != '2fa':
+            return {}
+        return self.wallet.billing_info if self.wallet.billing_info is not None else {}
 
     @pyqtProperty(bool, notify=dataChanged)
     def canHaveLightning(self):
@@ -359,6 +374,10 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         return self._seed
 
     @pyqtProperty(str, notify=dataChanged)
+    def seedPassphrase(self):
+        return self._seed_passphrase
+
+    @pyqtProperty(str, notify=dataChanged)
     def txinType(self):
         if self.wallet.wallet_type == 'imported':
             return self.wallet.txin_type
@@ -366,7 +385,7 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
 
     @pyqtProperty(str, notify=dataChanged)
     def seedType(self):
-        return self.wallet.db.get('seed_type')
+        return self.wallet.get_seed_type()
 
     @pyqtProperty(bool, notify=dataChanged)
     def isWatchOnly(self):
@@ -462,6 +481,12 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         return self._lightningbalance
 
     @pyqtProperty(QEAmount, notify=balanceChanged)
+    def lightningBalanceFrozen(self):
+        if self.isLightning:
+            self._lightningbalancefrozen.satsInt = int(self.wallet.lnworker.get_balance(frozen=True))
+        return self._lightningbalancefrozen
+
+    @pyqtProperty(QEAmount, notify=balanceChanged)
     def totalBalance(self):
         total = self.confirmedBalance.satsInt + self.lightningBalance.satsInt
         self._totalbalance.satsInt = total
@@ -491,40 +516,45 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         self.isLightningChanged.emit()
         self.dataChanged.emit()
 
-    @auth_protect()
-    def sign(self, tx, *, broadcast: bool = False, on_success: Callable[[Transaction], None] = None, on_failure: Callable[[], None] = None):
-        sign_hook = run_hook('tc_sign_wrapper', self.wallet, tx, partial(self.on_sign_complete, broadcast, on_success), partial(self.on_sign_failed, on_failure))
-        if sign_hook:
-            success = self.do_sign(tx, False)
-            if success:
-                self._logger.debug('plugin needs to sign tx too')
-                sign_hook(tx)
-                return
-        else:
-            success = self.do_sign(tx, broadcast)
+    @auth_protect(message=_('Sign and send on-chain transaction?'))
+    def sign_and_broadcast(self, tx, *,
+                           on_success: Callable[[Transaction], None] = None,
+                           on_failure: Callable[[Optional[Any]], None] = None) -> None:
+        self.do_sign(tx, True, on_success, on_failure)
 
-        if success:
-            if on_success:
-                on_success(tx)
-        else:
-            if on_failure:
-                on_failure()
+    @auth_protect(message=_('Sign on-chain transaction?'))
+    def sign(self, tx, *,
+             on_success: Callable[[Transaction], None] = None,
+             on_failure: Callable[[Optional[Any]], None] = None) -> None:
+        self.do_sign(tx, False, on_success, on_failure)
 
-    def do_sign(self, tx, broadcast):
+    def do_sign(self, tx, broadcast, on_success: Callable[[Transaction], None] = None, on_failure: Callable[[Optional[Any]], None] = None):
+        # tc_sign_wrapper is only used by 2fa. don't pass on_failure handler, it is handled via otpFailed signal
+        sign_hook = run_hook('tc_sign_wrapper', self.wallet, tx,
+                             partial(self.on_sign_complete, broadcast, on_success),
+                             partial(self.on_sign_failed, None))
         try:
-            tx = self.wallet.sign_transaction(tx, self.password)
+            # ignore_warnings=True, because UI checks and asks user confirmation itself
+            tx = self.wallet.sign_transaction(tx, self.password, ignore_warnings=True)
         except BaseException as e:
             self._logger.error(f'{e!r}')
-            self.signFailed.emit(str(e))
+            if on_failure:
+                on_failure(str(e))
+            return
 
         if tx is None:
             self._logger.info('did not sign')
-            return False
+            if on_failure:
+                on_failure()
+            return
+
+        if sign_hook:
+            self._logger.debug('plugin needs to sign tx too')
+            sign_hook(tx)
+            return
 
         txid = tx.txid()
         self._logger.debug(f'do_sign(), txid={txid}')
-
-        self.signSucceeded.emit(txid)
 
         if not tx.is_complete():
             self._logger.debug('tx not complete')
@@ -536,7 +566,8 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
             # not broadcasted, so refresh history here
             self.historyModel.initModel(True)
 
-        return True
+        if on_success:
+            on_success(tx)
 
     # this assumes a 2fa wallet, but there are no other tc_sign_wrapper hooks, so that's ok
     def on_sign_complete(self, broadcast, cb: Callable[[Transaction], None] = None, tx: Transaction = None):
@@ -700,11 +731,15 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         try:
             self._logger.info('setting new password')
             self.wallet.update_password(current_password, password, encrypt_storage=True)
-            self.password = password
+            self.wallet.unlock(password)
             return True
         except InvalidPassword as e:
             self._logger.exception(repr(e))
             return False
+
+    @property
+    def password(self):
+        return self.wallet.get_unlocked_password()
 
     @pyqtSlot(str)
     def importAddresses(self, addresslist):
@@ -747,9 +782,11 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     def retrieve_seed(self):
         try:
             self._seed = self.wallet.get_seed(self.password)
+            self._seed_passphrase = self.wallet.keystore.get_passphrase(self.password)
             self.seedRetrieved.emit()
         except Exception:
             self._seed = ''
+            self._seed_passphrase = ''
 
         self.dataChanged.emit()
 

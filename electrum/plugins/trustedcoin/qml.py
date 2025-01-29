@@ -15,11 +15,14 @@ if TYPE_CHECKING:
     from electrum.wizard import NewWalletWizard
 
 
-
 class Plugin(TrustedCoinPlugin):
-
     def __init__(self, *args):
         super().__init__(*args)
+        self._app = None
+        self.so = None
+        self.on_success = None
+        self.on_failure = None
+        self.tx = None
 
     @hook
     def load_wallet(self, wallet: 'Abstract_Wallet'):
@@ -74,8 +77,11 @@ class Plugin(TrustedCoinPlugin):
             'trustedcoin_keep_disable': {
                 'gui': '../../../../plugins/trustedcoin/qml/KeepDisable',
             },
-            'trustedcoin_tos_email': {
+            'trustedcoin_tos': {
                 'gui': '../../../../plugins/trustedcoin/qml/Terms',
+            },
+            'trustedcoin_keystore_unlock': {
+                # TODO when QML can import external wallet files
             },
             'trustedcoin_show_confirm_otp': {
                 'gui': '../../../../plugins/trustedcoin/qml/ShowConfirmOTP',
@@ -111,7 +117,7 @@ class Plugin(TrustedCoinPlugin):
             else:
                 self.on_failure(_('Service Error') + ':\n' + str(e))
         except Exception as e:
-                self.on_failure(_('Error') + ':\n' + str(e))
+            self.on_failure(_('Error') + ':\n' + str(e))
         else:
             self.on_success(self.tx)
 

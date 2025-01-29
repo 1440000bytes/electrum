@@ -19,12 +19,30 @@ source.include_exts = py,png,jpg,qml,qmltypes,ttf,txt,gif,pem,mo,json,csv,so,svg
 source.exclude_exts = spec
 
 # (list) List of directory to exclude (let empty to not exclude anything)
-source.exclude_dirs = bin, build, dist, contrib, env,
-    electrum/tests,
+source.exclude_dirs =
+    bin,
+    build,
+    dist,
+    contrib,
+    env,
+    tests,
+    fastlane,
     electrum/www,
+    electrum/scripts,
+    electrum/utils,
     electrum/gui/qt,
-    electrum/gui/kivy,
+    electrum/plugins/audio_modem,
+    electrum/plugins/bitbox02,
+    electrum/plugins/coldcard,
+    electrum/plugins/digitalbitbox,
+    electrum/plugins/hw_wallet,
+    electrum/plugins/jade,
+    electrum/plugins/keepkey,
+    electrum/plugins/ledger,
+    electrum/plugins/trezor,
     electrum/plugins/payserver,
+    electrum/plugins/revealer,
+    electrum/plugins/safe_t,
     packages/qdarkstyle,
     packages/qtpy,
     packages/bin,
@@ -39,7 +57,7 @@ source.exclude_patterns = Makefile,setup*,
     packages/frozenlist-*.dist-info/*
 
 # (str) Application versioning (method 1)
-version.regex = APK_VERSION = '(.*)'
+version.regex = ELECTRUM_VERSION = '(.*)'
 version.filename = %(source.dir)s/electrum/version.py
 
 # (str) Application versioning (method 2)
@@ -88,16 +106,16 @@ android.permissions = INTERNET, CAMERA, WRITE_EXTERNAL_STORAGE
 android.api = 31
 
 # (int) Android targetSdkVersion
-android.target_sdk_version = 33
+android.target_sdk_version = 34
 
 # (int) Minimum API required. You will need to set the android.ndk_api to be as low as this value.
-android.minapi = 21
+android.minapi = 23
 
 # (str) Android NDK version to use
 android.ndk = 23b
 
 # (int) Android NDK API to use (optional). This is the minimum API your app will support.
-android.ndk_api = 21
+android.ndk_api = 23
 
 # (bool) Use --private data storage (True) or --dir public storage (False)
 #android.private_storage = True
@@ -175,7 +193,7 @@ android.manifest.intent_filters = contrib/android/bitcoin_intent.xml
 # (str) launchMode to set for the main activity
 android.manifest.launch_mode = singleTask
 
-# (list) Android additionnal libraries to copy into libs/armeabi
+# (list) Android additional libraries to copy into libs/armeabi
 #android.add_libs_armeabi = lib/android/*.so
 
 # (bool) Indicate whether the screen should stay on

@@ -1,9 +1,6 @@
 import sys
 
-if getattr(sys, '_GUI_QT_VERSION') == 5:  # FIXME: remove when both desktop and mobile are Qt6
-    from PyQt5.QtCore import pyqtSignal, pyqtProperty, QObject
-else:
-    from PyQt6.QtCore import pyqtSignal, pyqtProperty, QObject
+from PyQt6.QtCore import pyqtSignal, pyqtProperty, QObject
 
 from electrum.logging import get_logger
 

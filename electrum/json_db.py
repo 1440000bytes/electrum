@@ -25,7 +25,7 @@
 import threading
 import copy
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import jsonpatch
 
 from . import util
@@ -88,7 +88,10 @@ def key_path(path, key):
         else:
             assert isinstance(x, str)
             return x
-    return '/' + '/'.join([to_str(x) for x in path + [to_str(key)]])
+    items = [to_str(x) for x in path]
+    if key is not None:
+        items.append(to_str(key))
+    return '/' + '/'.join(items)
 
 
 class StoredObject:
@@ -159,6 +162,9 @@ class StoredDict(dict):
         # convert lists
         if isinstance(v, list):
             v = StoredList(v, self.db, self.path + [key])
+        # reject sets. they do not work well with jsonpatch
+        if isinstance(v, set):
+            raise Exception(f"Do not store sets inside jsondb. path={self.path!r}")
         # set item
         dict.__setitem__(self, key, v)
         if self.db and patch:
@@ -206,11 +212,24 @@ class StoredList(list):
         if self.db:
             self.db.add_patch({'op': 'remove', 'path': key_path(self.path, '%d'%n)})
 
+    @locked
+    def clear(self):
+        list.clear(self)
+        if self.db:
+            self.db.add_patch({'op': 'replace', 'path': key_path(self.path, None), 'value':[]})
+
 
 
 class JsonDB(Logger):
 
-    def __init__(self, s: str, storage=None, encoder=None, upgrader=None):
+    def __init__(
+        self,
+        s: str,
+        *,
+        storage: Optional['WalletStorage'] = None,
+        encoder=None,
+        upgrader=None,
+    ):
         Logger.__init__(self)
         self.lock = threading.RLock()
         self.storage = storage
@@ -228,8 +247,7 @@ class JsonDB(Logger):
         if self.storage and self.storage.file_exists():
             self.write_and_force_consolidation()
 
-    def load_data(self, s:str) -> dict:
-        """ overloaded in wallet_db """
+    def load_data(self, s: str) -> dict:
         if s == '':
             return {}
         try:

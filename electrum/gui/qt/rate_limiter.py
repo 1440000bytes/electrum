@@ -7,7 +7,7 @@ import threading
 import time
 import weakref
 
-from PyQt5.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer
 
 from electrum.logging import Logger, get_logger
 
@@ -17,7 +17,7 @@ _logger = get_logger(__name__)
 
 class RateLimiter(Logger):
     ''' Manages the state of a @rate_limited decorated function, collating
-    multiple invocations. This class is not intented to be used directly. Instead,
+    multiple invocations. This class is not intended to be used directly. Instead,
     use the @rate_limited decorator (for instance methods).
     This state instance gets inserted into the instance attributes of the target
     object wherever a @rate_limited decorator appears.
@@ -98,7 +98,7 @@ class RateLimiter(Logger):
                 self.timer.start(int(diff*1e3))
                 #self.logger.debug("deferring")
         else:
-            # We had a timer active, which means as future call will occur. So return early and let that call happenin the future.
+            # We had a timer active, which means as future call will occur. So return early and let that call happen in the future.
             # Note that a side-effect of this aborted invocation was to update self.saved_args.
             pass
             #self.logger.debug("ignoring (already scheduled)")

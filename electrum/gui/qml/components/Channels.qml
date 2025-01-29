@@ -125,7 +125,8 @@ Pane {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 text: qsTr('Swap');
-                enabled: Daemon.currentWallet.lightningCanSend.satsInt > 0 || Daemon.currentWallet.lightningCanReceive.satInt > 0
+                enabled: Daemon.currentWallet.lightningCanSend.satsInt > 0 ||
+                    (Daemon.currentWallet.lightningCanReceive.satsInt > 0 && Daemon.currentWallet.confirmedBalance.satsInt > 0)
                 icon.source: Qt.resolvedUrl('../../icons/update.png')
                 onClicked: app.startSwap()
             }
@@ -155,7 +156,6 @@ Pane {
                 }
                 icon.source: '../../icons/lightning.png'
             }
-
         }
 
     }
@@ -164,21 +164,6 @@ Pane {
         id: openChannelDialog
         OpenChannelDialog {
             onClosed: destroy()
-        }
-    }
-
-    Component {
-        id: importChannelBackupDialog
-        ImportChannelBackupDialog {
-            onClosed: destroy()
-        }
-    }
-
-    Connections {
-        target: Daemon.currentWallet
-        function onImportChannelBackupFailed(message) {
-            var dialog = app.messageDialog.createObject(root, { title: qsTr('Error'), text: message })
-            dialog.open()
         }
     }
 

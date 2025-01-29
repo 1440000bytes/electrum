@@ -37,29 +37,29 @@ ElDialog {
                 id: rootLayout
                 width: parent.width
 
-                columns: 4
+                columns: 3
 
                 InfoTextArea {
                     Layout.fillWidth: true
-                    Layout.columnSpan: 4
+                    Layout.columnSpan: 3
                     visible: !Daemon.currentWallet.lightningHasDeterministicNodeId
                     iconStyle: InfoTextArea.IconStyle.Warn
                     text: Daemon.currentWallet.seedType == 'segwit'
-                        ? [ qsTr('Your channels cannot be recovered from seed, because they were created with an old version of Electrum.'),
-                            qsTr('This means that you must save a backup of your wallet everytime you create a new channel.'),
+                        ? [ qsTr('Your channels cannot be recovered from seed, because they were created with an old version of Electrum.'), ' ',
+                            qsTr('This means that you must save a backup of your wallet every time you create a new channel.'),
                             '\n\n',
                             qsTr('If you want this wallet to have recoverable channels, you must close your existing channels and restore this wallet from seed.')
-                          ].join(' ')
-                        : [ qsTr('Your channels cannot be recovered from seed.'),
-                            qsTr('This means that you must save a backup of your wallet everytime you create a new channel.'),
+                          ].join('')
+                        : [ qsTr('Your channels cannot be recovered from seed.'), ' ',
+                            qsTr('This means that you must save a backup of your wallet every time you create a new channel.'),
                             '\n\n',
                             qsTr('If you want to have recoverable channels, you must create a new wallet with an Electrum seed')
-                          ].join(' ')
+                          ].join('')
                 }
 
                 InfoTextArea {
                     Layout.fillWidth: true
-                    Layout.columnSpan: 4
+                    Layout.columnSpan: 3
                     visible: Daemon.currentWallet.lightningHasDeterministicNodeId && !Config.useRecoverableChannels
                     iconStyle: InfoTextArea.IconStyle.Warn
                     text: [ qsTr('You currently have recoverable channels setting disabled.'),
@@ -69,6 +69,7 @@ ElDialog {
 
                 Label {
                     text: qsTr('Node')
+                    Layout.columnSpan: 3
                     color: Material.accentColor
                 }
 
@@ -81,6 +82,11 @@ ElDialog {
                     font.family: FixedFont
                     wrapMode: Text.Wrap
                     placeholderText: qsTr('Paste or scan node uri/pubkey')
+                    inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+                    onTextChanged: {
+                        if (activeFocus)
+                            channelopener.connectStr = text
+                    }
                     onActiveFocusChanged: {
                         if (!activeFocus)
                             channelopener.connectStr = text
@@ -95,9 +101,17 @@ ElDialog {
                         icon.height: constants.iconSizeMedium
                         icon.width: constants.iconSizeMedium
                         onClicked: {
-                            if (channelopener.validateConnectString(AppController.clipboardToText())) {
-                                channelopener.connectStr = AppController.clipboardToText()
+                            var cliptext = AppController.clipboardToText()
+                            if (!cliptext)
+                                return
+                            if (channelopener.validateConnectString(cliptext)) {
+                                channelopener.connectStr = cliptext
                                 node.text = channelopener.connectStr
+                            } else {
+                                var dialog = app.messageDialog.createObject(app, {
+                                    text: qsTr('Invalid node-id or connect string')
+                                })
+                                dialog.open()
                             }
                         }
                     }
@@ -108,12 +122,17 @@ ElDialog {
                         scale: 1.2
                         onClicked: {
                             var dialog = app.scanDialog.createObject(app, {
-                                hint: qsTr('Scan a channel connect string')
+                                hint: qsTr('Scan a node-id or a connect string')
                             })
                             dialog.onFound.connect(function() {
                                 if (channelopener.validateConnectString(dialog.scanData)) {
                                     channelopener.connectStr = dialog.scanData
                                     node.text = channelopener.connectStr
+                                } else {
+                                    var errdialog = app.messageDialog.createObject(app, {
+                                        text: qsTr('Invalid node-id or connect string')
+                                    })
+                                    errdialog.open()
                                 }
                                 dialog.close()
                             })
@@ -143,6 +162,7 @@ ElDialog {
 
                 Label {
                     text: qsTr('Amount')
+                    Layout.columnSpan: 3
                     color: Material.accentColor
                 }
 
@@ -155,7 +175,6 @@ ElDialog {
                 }
 
                 RowLayout {
-                    Layout.columnSpan: 2
                     Layout.fillWidth: true
                     Label {
                         text: Config.baseUnit
@@ -219,13 +238,17 @@ ElDialog {
             if (code == 'invalid_nodeid') {
                 var dialog = app.messageDialog.createObject(app, {
                     title: qsTr('Error'),
+                    iconSource: Qt.resolvedUrl('../../icons/warning.png'),
                     text: message
                 })
                 dialog.open()
             }
         }
         onConflictingBackup: (message) => {
-            var dialog = app.messageDialog.createObject(app, { 'text': message, 'yesno': true })
+            var dialog = app.messageDialog.createObject(app, {
+                text: message,
+                yesno: true
+            })
             dialog.open()
             dialog.accepted.connect(function() {
                 channelopener.openChannel(true)
@@ -233,7 +256,7 @@ ElDialog {
         }
         onFinalizerChanged: {
             var dialog = confirmOpenChannelDialog.createObject(app, {
-                'satoshis': channelopener.amount
+                satoshis: channelopener.amount
             })
             dialog.accepted.connect(function() {
                 dialog.finalizer.signAndSend()

@@ -9,6 +9,7 @@ from electrum import Network, keystore
 from electrum.bip32 import BIP32Node
 from electrum.bip39_recovery import account_discovery
 from electrum.logging import get_logger
+from electrum.util import get_asyncio_loop
 
 from .util import TaskThread
 
@@ -76,7 +77,7 @@ class QEBip39RecoveryListModel(QAbstractListModel):
 
         assert wallet_type == 'standard'
 
-        self._root_seed = keystore.bip39_to_seed(seed, seed_extra_words)
+        self._root_seed = keystore.bip39_to_seed(seed, passphrase=seed_extra_words)
 
         self.clear()
 
@@ -84,7 +85,7 @@ class QEBip39RecoveryListModel(QAbstractListModel):
         network = Network.get_instance()
         coro = account_discovery(network, self.get_account_xpub)
         self.state = QEBip39RecoveryListModel.State.Scanning
-        fut = asyncio.run_coroutine_threadsafe(coro, network.asyncio_loop)
+        fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
         self._thread.add(
             fut.result,
             on_success=self.on_recovery_success,

@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING, Set
 
 from PyQt6.QtCore import (pyqtSlot, pyqtSignal, pyqtProperty, QObject, QT_VERSION_STR, PYQT_VERSION_STR,
                           qInstallMessageHandler, QTimer, QSortFilterProxyModel)
-from PyQt6.QtGui import QGuiApplication, QFontDatabase, QScreen
-from PyQt6.QtQml import qmlRegisterType, qmlRegisterUncreatableType, QQmlApplicationEngine
+from PyQt6.QtGui import QGuiApplication, QFontDatabase
+from PyQt6.QtQml import qmlRegisterType, QQmlApplicationEngine
 
+import electrum
 from electrum import version, constants
 from electrum.i18n import _
 from electrum.logging import Logger, get_logger
@@ -28,7 +29,7 @@ from .qeqr import QEQRParser, QEQRImageProvider, QEQRImageProviderHelper
 from .qeqrscanner import QEQRScanner
 from .qebitcoin import QEBitcoin
 from .qefx import QEFX
-from .qetxfinalizer import QETxFinalizer, QETxRbfFeeBumper, QETxCpfpFeeBumper, QETxCanceller
+from .qetxfinalizer import QETxFinalizer, QETxRbfFeeBumper, QETxCpfpFeeBumper, QETxCanceller, QETxSweepFinalizer
 from .qeinvoice import QEInvoice, QEInvoiceParser
 from .qerequestdetails import QERequestDetails
 from .qetypes import QEAmount
@@ -145,13 +146,17 @@ class QEAppController(BaseCrashReporter, QObject):
             pass
 
     def doNotify(self, wallet_name, message):
+        self.logger.debug(f'sending push notification to OS: {message=!r}')
+        # FIXME: this does not work on Android 13+. We would need to declare (in manifest)
+        #        and also request-at-runtime android.permission.POST_NOTIFICATIONS.
         try:
             # TODO: lazy load not in UI thread please
             global notification
             if not notification:
                 from plyer import notification
-            icon = (os.path.dirname(os.path.realpath(__file__))
-                    + '/../icons/electrum.png')
+            icon = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "icons", "electrum.png",
+            )
             notification.notify('Electrum', message, app_icon=icon, app_name='Electrum')
         except ImportError:
             self.logger.warning('Notification: needs plyer; `sudo python3 -m pip install plyer`')
@@ -205,20 +210,45 @@ class QEAppController(BaseCrashReporter, QObject):
         it = jIntent.createChooser(sendIntent, cast('java.lang.CharSequence', jString(title)))
         jpythonActivity.startActivity(it)
 
+    @pyqtSlot()
+    def setMaxScreenBrightness(self):
+        self._set_screen_brightness(1.0)
+
+    @pyqtSlot()
+    def resetScreenBrightness(self):
+        self._set_screen_brightness(-1.0)
+
+    def _set_screen_brightness(self, br: float) -> None:
+        """br is the desired screen brightness, a value in the [0, 1] interval.
+        A negative value, e.g. -1.0, means a "reset" back to the system preferred value.
+        """
+        if not self.isAndroid():
+            return
+        from android.runnable import run_on_ui_thread
+
+        @run_on_ui_thread
+        def set_br():
+            window = jpythonActivity.getWindow()
+            attrs = window.getAttributes()
+            attrs.screenBrightness = br
+            window.setAttributes(attrs)
+        set_br()
+
     @pyqtSlot('QString')
     def textToClipboard(self, text):
         QGuiApplication.clipboard().setText(text)
 
     @pyqtSlot(result='QString')
     def clipboardToText(self):
-        return QGuiApplication.clipboard().text()
+        clip = QGuiApplication.clipboard()
+        return clip.text() if clip.mimeData().hasText() else ''
 
     @pyqtSlot(str, result=QObject)
     def plugin(self, plugin_name):
         self.logger.debug(f'now {self._plugins.count()} plugins loaded')
         plugin = self._plugins.get(plugin_name)
         self.logger.debug(f'plugin with name {plugin_name} is {str(type(plugin))}')
-        if plugin and hasattr(plugin,'so'):
+        if plugin and hasattr(plugin, 'so'):
             return plugin.so
         else:
             self.logger.debug('None!')
@@ -263,9 +293,9 @@ class QEAppController(BaseCrashReporter, QObject):
             'reportstring': self.get_report_string()
         }
 
-    @pyqtSlot(object,object,object,object)
+    @pyqtSlot(object, object, object, object)
     def crash(self, config, e, text, tb):
-        self.exc_args = (e, text, tb) # for BaseCrashReporter
+        self.exc_args = (e, text, tb)  # for BaseCrashReporter
         self.showException.emit(self.crashData())
 
     @pyqtSlot()
@@ -304,7 +334,7 @@ class QEAppController(BaseCrashReporter, QObject):
         # if traceback contains special HTML characters, e.g. '<',
         # they need to be escaped to avoid formatting issues.
         traceback_str = super()._get_traceback_str_to_display()
-        return html.escape(traceback_str).replace('&#x27;','&apos;')
+        return html.escape(traceback_str).replace('&#x27;', '&apos;')
 
     def get_user_description(self):
         return self._crash_user_text
@@ -326,6 +356,8 @@ class QEAppController(BaseCrashReporter, QObject):
     @secureWindow.setter
     def secureWindow(self, secure):
         if not self.isAndroid():
+            return
+        if self.config.GUI_QML_ALWAYS_ALLOW_SCREENSHOTS:
             return
         if self._secureWindow != secure:
             jpythonActivity.setSecureWindow(secure)
@@ -369,6 +401,7 @@ class ElectrumQmlApplication(QGuiApplication):
         qmlRegisterType(QETxRbfFeeBumper, 'org.electrum', 1, 0, 'TxRbfFeeBumper')
         qmlRegisterType(QETxCpfpFeeBumper, 'org.electrum', 1, 0, 'TxCpfpFeeBumper')
         qmlRegisterType(QETxCanceller, 'org.electrum', 1, 0, 'TxCanceller')
+        qmlRegisterType(QETxSweepFinalizer, 'org.electrum', 1, 0, 'SweepFinalizer')
         qmlRegisterType(QEBip39RecoveryListModel, 'org.electrum', 1, 0, 'Bip39RecoveryListModel')
 
         # TODO QT6: these were declared as uncreatable, but that doesn't seem to work for pyqt6
@@ -415,8 +448,14 @@ class ElectrumQmlApplication(QGuiApplication):
             'qt_version': QT_VERSION_STR,
             'pyqt_version': PYQT_VERSION_STR
         })
+        self.context.setContextProperty('UI_UNIT_NAME', {
+            "FEERATE_SAT_PER_VBYTE": electrum.util.UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE,
+            "FEERATE_SAT_PER_VB":    electrum.util.UI_UNIT_NAME_FEERATE_SAT_PER_VB,
+            "TXSIZE_VBYTES":         electrum.util.UI_UNIT_NAME_TXSIZE_VBYTES,
+            "MEMPOOL_MB":            electrum.util.UI_UNIT_NAME_MEMPOOL_MB,
+        })
 
-        self.plugins.load_plugin('trustedcoin')
+        self.plugins.load_internal_plugin('trustedcoin')
 
         qInstallMessageHandler(self.message_handler)
 

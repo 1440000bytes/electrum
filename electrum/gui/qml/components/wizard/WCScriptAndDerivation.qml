@@ -48,8 +48,10 @@ WizardComponent {
         var p = isMultisig ? getMultisigScriptTypePurposeDict() : getScriptTypePurposeDict()
         if (!scripttypegroup.checkedButton.scripttype in p)
             return
-        if (!bitcoin.verifyDerivationPath(derivationpathtext.text))
+        if (!bitcoin.verifyDerivationPath(derivationpathtext.text)) {
+            validationtext.text = qsTr('Invalid derivation path')
             return
+        }
 
         if (isMultisig && cosigner) {
             apply()
@@ -171,6 +173,8 @@ WizardComponent {
                 id: derivationpathtext
                 Layout.fillWidth: true
                 Layout.leftMargin: constants.paddingMedium
+                inputMethodHints: Qt.ImhNoPredictiveText
+
                 onTextChanged: validate()
             }
 

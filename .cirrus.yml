@@ -11,13 +11,13 @@ task:
         ELECTRUM_PYTHON_NAME: python3
       matrix:
        - env:
-           ELECTRUM_PYTHON_VERSION: 3.8
-       - env:
-           ELECTRUM_PYTHON_VERSION: 3.9
-       - env:
            ELECTRUM_PYTHON_VERSION: 3.10
        - env:
            ELECTRUM_PYTHON_VERSION: 3.11
+       - env:
+           ELECTRUM_PYTHON_VERSION: 3.12
+       - env:
+           ELECTRUM_PYTHON_VERSION: 3.13
        - name: "unittests: Tox Python 3 debug mode"
          env:
            ELECTRUM_PYTHON_VERSION: 3.11
@@ -33,15 +33,26 @@ task:
     - git tag
   install_script:
     - apt-get update
-    - apt-get -y install libsecp256k1-dev
+    # qml test reqs:
+    - apt-get -y install libgl1 libegl1 libxkbcommon0 libdbus-1-3
     - pip install -r $ELECTRUM_REQUIREMENTS_CI
+  libsecp_build_cache:
+    folder: contrib/_saved_secp256k1_build
+    fingerprint_script: sha256sum ./contrib/make_libsecp256k1.sh
+    populate_script:
+      - apt-get -y install automake libtool
+      - ./contrib/make_libsecp256k1.sh
+      - mkdir contrib/_saved_secp256k1_build
+      - cp electrum/libsecp256k1.so.* contrib/_saved_secp256k1_build/
   tox_script:
     - export PYTHONASYNCIODEBUG
     - export PYTHONDEVMODE
+    - export ELECTRUM_ECC_DONT_COMPILE=1
     - tox
   coveralls_script:
     - if [ ! -z "$COVERALLS_REPO_TOKEN" ] ; then coveralls ; fi
   env:
+    LD_LIBRARY_PATH: contrib/_saved_secp256k1_build/
     ELECTRUM_REQUIREMENTS_CI: contrib/requirements/requirements-ci.txt
     ELECTRUM_REQUIREMENTS: contrib/requirements/requirements.txt
     # following CI_* env vars are set up for coveralls
@@ -72,11 +83,11 @@ task:
   locale_script:
     - contrib/push_locale
   env:
-    ELECTRUM_IMAGE: python:3.8
+    ELECTRUM_IMAGE: python:3.10
     ELECTRUM_REQUIREMENTS_CI: contrib/requirements/requirements-ci.txt
     # in addition, crowdin_api_key is set as an "override" in https://cirrus-ci.com/settings/...
   depends_on:
-    - "unittests: Tox Python 3.8"
+    - "unittests: Tox Python 3.10"
   only_if: $CIRRUS_BRANCH == 'master'
 
 task:
@@ -95,7 +106,9 @@ task:
     populate_script: mkdir -p /tmp/bitcoind
   install_script:
     - apt-get update
-    - apt-get -y install libsecp256k1-dev curl jq bc
+    - apt-get -y install curl jq bc
+    # install electrum
+    - export ELECTRUM_ECC_DONT_COMPILE=1  # we build manually to make caching it easier
     - pip3 install .[tests]
     # install e-x some commits after 1.16.0 tag
     - pip3 install git+https://github.com/spesmilo/electrumx.git@4e66804dc0d668cd6bd4602b547e2f5b2e227e97
@@ -105,14 +118,23 @@ task:
     - BITCOIND_URL=https://bitcoincore.org/bin/bitcoin-core-$BITCOIND_VERSION/$BITCOIND_FILENAME
     - tar -xaf $BITCOIND_PATH || (rm -f /tmp/bitcoind/* && curl --output $BITCOIND_PATH $BITCOIND_URL && tar -xaf $BITCOIND_PATH)
     - cp -a bitcoin-$BITCOIND_VERSION/* /usr/
+  libsecp_build_cache:
+    folder: contrib/_saved_secp256k1_build
+    fingerprint_script: sha256sum ./contrib/make_libsecp256k1.sh
+    populate_script:
+      - apt-get -y install automake libtool
+      - ./contrib/make_libsecp256k1.sh
+      - mkdir contrib/_saved_secp256k1_build
+      - cp electrum/libsecp256k1.so.* contrib/_saved_secp256k1_build/
   bitcoind_service_background_script:
-    - electrum/tests/regtest/run_bitcoind.sh
+    - tests/regtest/run_bitcoind.sh
   electrumx_service_background_script:
-    - electrum/tests/regtest/run_electrumx.sh
+    - tests/regtest/run_electrumx.sh
   regtest_script:
     - sleep 10s
-    - python3 -m unittest electrum/tests/regtest.py
+    - python3 -m unittest tests/regtest.py
   env:
+    LD_LIBRARY_PATH: contrib/_saved_secp256k1_build/
     ELECTRUM_REQUIREMENTS: contrib/requirements/requirements.txt
     # ElectrumX exits with an error without this:
     ALLOW_ROOT: 1
@@ -128,11 +150,11 @@ task:
     folder: ~/.cache/pip
     fingerprint_script: echo Flake8 && echo $ELECTRUM_IMAGE && cat $ELECTRUM_REQUIREMENTS
   install_script:
-    - pip install flake8 flake8-bugbear
+    - pip install "flake8==7.0.0" "flake8-bugbear==24.1.16"
   flake8_script:
     - flake8 . --count --select="$ELECTRUM_LINTERS" --ignore="$ELECTRUM_LINTERS_IGNORE" --show-source --statistics --exclude "*_pb2.py,electrum/_vendor/"
   env:
-    ELECTRUM_IMAGE: python:3.8
+    ELECTRUM_IMAGE: python:3.10
     ELECTRUM_REQUIREMENTS: contrib/requirements/requirements.txt
   matrix:
     - name: "linter: Flake8 Mandatory"
@@ -142,27 +164,37 @@ task:
         # - https://pycodestyle.pycqa.org/en/latest/intro.html#error-codes
         # - https://github.com/PyCQA/flake8-bugbear/tree/8c0e7eb04217494d48d0ab093bf5b31db0921989#list-of-warnings
         ELECTRUM_LINTERS: E9,E101,E129,E273,E274,E703,E71,E722,F63,F7,F82,W191,W29,B
-        ELECTRUM_LINTERS_IGNORE: B007,B009,B010,B019
+        ELECTRUM_LINTERS_IGNORE: B007,B009,B010,B019,B036
     - name: "linter: Flake8 Non-Mandatory"
       env:
         ELECTRUM_LINTERS: E,F,W,C90,B
         ELECTRUM_LINTERS_IGNORE: ""
       allow_failures: true
 
+
+# Cron jobs configured in https://cirrus-ci.com/settings/...
+# - job "nightly" on branch "master" at "0 30 2 * * ?"  (every day at 02:30Z)
 task:
   name: "build: Windows"
+  matrix:
+    - trigger_type: manual
+      only_if: $CIRRUS_CRON == ""
+    - trigger_type: automatic
+      only_if: $CIRRUS_CRON == "nightly"
   container:
     dockerfile: contrib/build-wine/Dockerfile
     cpu: 1
-    memory: 2G
+    memory: 3G
   pip_cache:
-    folder: contrib/build-wine/.cache/win32/wine_pip_cache
+    folders:
+      - contrib/build-wine/.cache/win*/wine_pip_cache
     fingerprint_script:
       - echo $CIRRUS_TASK_NAME
       - git ls-files -s contrib/deterministic-build/*.txt
       - git ls-files -s contrib/build-wine/
   build2_cache:
-    folder: contrib/build-wine/.cache/win32/build
+    folders:
+      - contrib/build-wine/.cache/win*/build
     fingerprint_script:
       - echo $CIRRUS_TASK_NAME
       - cat contrib/make_libsecp256k1.sh | sha256sum
@@ -178,10 +210,15 @@ task:
     CIRRUS_WORKING_DIR: /opt/wine64/drive_c/electrum
     CIRRUS_DOCKER_CONTEXT: contrib/build-wine
   depends_on:
-    - "unittests: Tox Python 3.8"
+    - "unittests: Tox Python 3.10"
 
 task:
   name: "build: Android (QML $APK_ARCH)"
+  matrix:
+    - trigger_type: manual
+      only_if: $CIRRUS_CRON == ""
+    - trigger_type: automatic
+      only_if: $CIRRUS_CRON == "nightly"
   timeout_in: 90m
   container:
     dockerfile: contrib/android/Dockerfile
@@ -207,7 +244,7 @@ task:
   binaries_artifacts:
     path: "dist/*"
   depends_on:
-    - "unittests: Tox Python 3.8"
+    - "unittests: Tox Python 3.10"
 
 ## mac build disabled, as Cirrus CI no longer supports Intel-based mac builds
 #task:
@@ -242,6 +279,11 @@ task:
 
 task:
   name: "build: AppImage"
+  matrix:
+    - trigger_type: manual
+      only_if: $CIRRUS_CRON == ""
+    - trigger_type: automatic
+      only_if: $CIRRUS_CRON == "nightly"
   container:
     dockerfile: contrib/build-linux/appimage/Dockerfile
     cpu: 2
@@ -265,7 +307,7 @@ task:
   env:
     CIRRUS_DOCKER_CONTEXT: contrib/build-linux/appimage
   depends_on:
-    - "unittests: Tox Python 3.8"
+    - "unittests: Tox Python 3.10"
 
 task:
   container:
@@ -288,12 +330,12 @@ task:
       env:
         OMIT_UNCLEAN_FILES: 1
   depends_on:
-    - "unittests: Tox Python 3.8"
+    - "unittests: Tox Python 3.10"
 
 task:
   name: "check submodules"
   container:
-    image: python:3.8
+    image: python:3.10
     cpu: 1
     memory: 1G
   fetch_script:

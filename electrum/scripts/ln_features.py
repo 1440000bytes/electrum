@@ -39,7 +39,7 @@ loop, stopping_fut, loop_thread = create_and_start_event_loop()
 time.sleep(2)
 
 if IS_TESTNET:
-    constants.set_testnet()
+    constants.BitcoinTestnet.set_as_network()
 daemon = Daemon(config, listen_jsonrpc=False)
 network = daemon.network
 assert network.asyncio_loop.is_running()
@@ -109,7 +109,7 @@ async def node_flag_stats(opt_flag: LnFeatures, presync: False):
     try:
         await wallet.lnworker.channel_db.data_loaded.wait()
 
-        # optionally presync graph (not relyable)
+        # optionally presync graph (not reliable)
         if presync:
             network.start_gossip()
 
@@ -126,7 +126,7 @@ async def node_flag_stats(opt_flag: LnFeatures, presync: False):
         with wallet.lnworker.channel_db.lock:
             nodes = wallet.lnworker.channel_db._nodes.copy()
 
-        # check how many nodes advertize opt/req flag in the gossip
+        # check how many nodes advertise opt/req flag in the gossip
         n_opt = 0
         n_req = 0
         print(f"analyzing {len(nodes.keys())} nodes")

@@ -26,8 +26,8 @@
 from typing import List, Dict, Callable, Any
 from abc import ABC, abstractmethod
 
-from PyQt5.QtGui import QColor
-from PyQt5.QtCore import Qt
+from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt
 
 from electrum.i18n import _
 from electrum.qrreader import QrCodeResult
@@ -101,10 +101,12 @@ class QrReaderValidatorColorizing(QrReaderValidatorCounting):
     based on the counts maintained by `QrReaderValidatorCounting`.
     """
 
-    WEAK_COLOR: QColor = QColor(Qt.red)
-    STRONG_COLOR: QColor = QColor(Qt.green)
+    WEAK_COLOR: QColor = QColor(Qt.GlobalColor.red)
+    STRONG_COLOR: QColor = QColor(Qt.GlobalColor.green)
 
-    strong_count: int = 10
+    strong_count: int = 2  # FIXME: make this time based rather than framect based
+    # note: we set a low strong_count to ~disable this mechanism and make QR codes
+    #       much easier to scan (but potentially with some false positives)
 
     def validate_results(self, results: List[QrCodeResult]) -> QrReaderValidatorResult:
         res = super().validate_results(results)

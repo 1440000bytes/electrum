@@ -5,9 +5,10 @@ from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject
 from electrum.i18n import _
 from electrum.logging import get_logger
 from electrum.util import format_time, TxMinedInfo
-from electrum.transaction import tx_from_any, Transaction
+from electrum.transaction import tx_from_any, Transaction, PartialTxInput, Sighash, PartialTransaction, TxOutpoint
 from electrum.network import Network
 from electrum.address_synchronizer import TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_FUTURE
+from electrum.wallet import TxSighashDanger
 
 from .qewallet import QEWallet
 from .qetypes import QEAmount
@@ -18,6 +19,7 @@ class QETxDetails(QObject, QtEventListener):
     _logger = get_logger(__name__)
 
     confirmRemoveLocalTx = pyqtSignal([str], arguments=['message'])
+    txRemoved = pyqtSignal()
     saveTxError = pyqtSignal([str,str], arguments=['code', 'message'])
     saveTxSuccess = pyqtSignal()
 
@@ -54,10 +56,12 @@ class QETxDetails(QObject, QtEventListener):
         self._is_unrelated = False
         self._is_complete = False
         self._is_mined = False
-        self._is_final = False
+        self._is_rbf_enabled = False
         self._lock_delay = 0
+        self._sighash_danger = TxSighashDanger()
 
         self._mempool_depth = ''
+        self._in_mempool = False
 
         self._date = ''
         self._timestamp = 0
@@ -79,6 +83,12 @@ class QETxDetails(QObject, QtEventListener):
         if wallet == self._wallet.wallet and tx.txid() == self._txid:
             self._logger.debug(f'new_transaction event for our txid {self._txid}')
             self.update()
+
+    @event_listener
+    def on_event_removed_transaction(self, wallet, tx):
+        if wallet == self._wallet.wallet and tx.txid() == self._txid:
+            self._logger.debug(f'removed my transaction {tx.txid()}')
+            self.txRemoved.emit()
 
     walletChanged = pyqtSignal()
     @pyqtProperty(QEWallet, notify=walletChanged)
@@ -140,6 +150,10 @@ class QETxDetails(QObject, QtEventListener):
     def status(self):
         return self._status
 
+    @pyqtProperty(str, notify=detailsChanged)
+    def warning(self):
+        return self._sighash_danger.get_long_message()
+
     @pyqtProperty(QEAmount, notify=detailsChanged)
     def amount(self):
         return self._amount
@@ -171,6 +185,10 @@ class QETxDetails(QObject, QtEventListener):
     @pyqtProperty(str, notify=detailsChanged)
     def mempoolDepth(self):
         return self._mempool_depth
+
+    @pyqtProperty(bool, notify=detailsChanged)
+    def inMempool(self):
+        return self._in_mempool
 
     @pyqtProperty(str, notify=detailsChanged)
     def date(self):
@@ -233,19 +251,23 @@ class QETxDetails(QObject, QtEventListener):
         return self._is_complete
 
     @pyqtProperty(bool, notify=detailsChanged)
-    def isFinal(self):
-        return self._is_final
+    def isRbfEnabled(self):
+        return self._is_rbf_enabled
 
     @pyqtProperty(int, notify=detailsChanged)
     def lockDelay(self):
         return self._lock_delay
+
+    @pyqtProperty(bool, notify=detailsChanged)
+    def shouldConfirm(self):
+        return self._sighash_danger.needs_confirm()
 
     def update(self, from_txid: bool = False):
         assert self._wallet
 
         if from_txid:
             self._tx = self._wallet.wallet.db.get_transaction(self._txid)
-            assert self._tx is not None
+            assert self._tx is not None, f'unknown txid "{self._txid}"'
 
         #self._logger.debug(repr(self._tx.to_json()))
 
@@ -255,10 +277,17 @@ class QETxDetails(QObject, QtEventListener):
             Network.run_from_another_thread(
                 self._tx.add_info_from_network(self._wallet.wallet.network, timeout=10))  # FIXME is this needed?...
 
-        self._inputs = list(map(lambda x: x.to_json(), self._tx.inputs()))
+        self._inputs = list(map(lambda x: {
+            'short_id': x.prevout.short_name(),
+            'value': x.value_sats(),
+            'address': x.address,
+            'is_mine': self._wallet.wallet.is_mine(x.address),
+            'is_change': self._wallet.wallet.is_change(x.address)
+        }, self._tx.inputs()))
         self._outputs = list(map(lambda x: {
             'address': x.get_ui_address_str(),
             'value': QEAmount(amount_sat=x.value),
+            'short_id': '',  # TODO
             'is_mine': self._wallet.wallet.is_mine(x.get_ui_address_str()),
             'is_change': self._wallet.wallet.is_change(x.get_ui_address_str()),
             'is_billing': self._wallet.wallet.is_billing_address(x.get_ui_address_str())
@@ -284,15 +313,21 @@ class QETxDetails(QObject, QtEventListener):
             fee_per_kb = txinfo.fee / size * 1000
             self._feerate_str = self._wallet.wallet.config.format_fee_rate(fee_per_kb)
 
+        self._sighash_danger = TxSighashDanger()
+
         self._lock_delay = 0
+        self._in_mempool = False
         self._is_mined = False if not txinfo.tx_mined_status else txinfo.tx_mined_status.height > 0
         if self._is_mined:
             self.update_mined_status(txinfo.tx_mined_status)
         else:
             if txinfo.tx_mined_status.height in [TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT]:
                 self._mempool_depth = self._wallet.wallet.config.depth_tooltip(txinfo.mempool_depth_bytes)
+                self._in_mempool = True
             elif txinfo.tx_mined_status.height == TX_HEIGHT_FUTURE:
                 self._lock_delay = txinfo.tx_mined_status.wanted_height - self._wallet.wallet.adb.get_local_height()
+            if isinstance(self._tx, PartialTransaction):
+                self._sighash_danger = self._wallet.wallet.check_sighash(self._tx)
 
         if self._wallet.wallet.lnworker:
             # Calling lnworker.get_onchain_history and wallet.get_full_history here
@@ -311,16 +346,20 @@ class QETxDetails(QObject, QtEventListener):
                 self._lnamount.satsInt = 0
 
         self._is_complete = self._tx.is_complete()
-        self._is_final = self._tx.is_final()
+        self._is_rbf_enabled = self._tx.is_rbf_enabled()
         self._is_unrelated = txinfo.amount is None and self._lnamount.isEmpty
         self._is_lightning_funding_tx = txinfo.is_lightning_funding_tx
         self._can_broadcast = txinfo.can_broadcast
-        self._can_bump = txinfo.can_bump and not txinfo.can_remove
-        self._can_dscancel = txinfo.can_dscancel and not txinfo.can_remove
-        self._can_cpfp = txinfo.can_cpfp and not txinfo.can_remove
-        self._can_save_as_local = txinfo.can_save_as_local and not txinfo.can_remove
+        self._can_bump = txinfo.can_bump
+        self._can_dscancel = txinfo.can_dscancel
+        self._can_cpfp = txinfo.can_cpfp
+        self._can_save_as_local = txinfo.can_save_as_local
         self._can_remove = txinfo.can_remove
-        self._can_sign = not self._is_complete and self._wallet.wallet.can_sign(self._tx)
+        self._can_sign = (
+            not self._is_complete
+            and self._wallet.wallet.can_sign(self._tx)
+            and not self._sighash_danger.needs_reject()
+        )
 
         self.detailsChanged.emit()
 
@@ -356,8 +395,10 @@ class QETxDetails(QObject, QtEventListener):
         if broadcast:
             self._wallet.broadcastSucceeded.connect(self.onBroadcastSucceeded)
             self._wallet.broadcastFailed.connect(self.onBroadcastFailed)
+            self._wallet.sign_and_broadcast(self._tx, on_success=self.on_signed_tx)
+        else:
+            self._wallet.sign(self._tx, on_success=self.on_signed_tx)
 
-        self._wallet.sign(self._tx, broadcast=broadcast, on_success=self.on_signed_tx)
         # side-effect: signing updates self._tx
         # we rely on this for broadcast
 
@@ -394,7 +435,7 @@ class QETxDetails(QObject, QtEventListener):
         self._can_broadcast = False
         self.detailsChanged.emit()
 
-    @pyqtSlot(str,str,str)
+    @pyqtSlot(str, str, str)
     def onBroadcastFailed(self, txid, code, reason):
         if txid != self._txid:
             return
@@ -409,9 +450,10 @@ class QETxDetails(QObject, QtEventListener):
 
     @pyqtSlot()
     @pyqtSlot(bool)
-    def removeLocalTx(self, confirm = False):
-        assert self._can_remove
+    def removeLocalTx(self, confirm=False):
+        assert self._can_remove, 'cannot remove'
         txid = self._txid
+        assert txid, 'txid unset'
 
         if not confirm:
             num_child_txs = len(self._wallet.wallet.adb.get_depending_transactions(txid))
@@ -428,7 +470,6 @@ class QETxDetails(QObject, QtEventListener):
 
         # NOTE: from here, the tx/txid is unknown and all properties are invalid.
         # UI should close TxDetails and avoid interacting with this qetxdetails instance.
-        self._txid = None
         self._tx = None
 
     @pyqtSlot()

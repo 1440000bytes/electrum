@@ -23,6 +23,16 @@ class QEConfig(AuthMixin, QObject):
         super().__init__(parent)
         self.config = config
 
+    @pyqtSlot(str, result=str)
+    def shortDescFor(self, key) -> str:
+        cv = getattr(self.config.cv, key)
+        return cv.get_short_desc() if cv else ''
+
+    @pyqtSlot(str, result=str)
+    def longDescFor(self, key) -> str:
+        cv = getattr(self.config.cv, key)
+        return cv.get_long_desc() if cv else ''
+
     languageChanged = pyqtSignal()
     @pyqtProperty(str, notify=languageChanged)
     def language(self):
@@ -128,7 +138,7 @@ class QEConfig(AuthMixin, QObject):
             self.config.CONFIG_PIN_CODE = pin_code
             self.pinCodeChanged.emit()
 
-    @auth_protect(method='wallet')
+    @auth_protect(method='wallet_else_pin')
     def pinCodeRemoveAuth(self):
         self.config.CONFIG_PIN_CODE = ""
         self.pinCodeChanged.emit()
@@ -168,6 +178,16 @@ class QEConfig(AuthMixin, QObject):
     def enableDebugLogs(self, enable):
         self.config.GUI_ENABLE_DEBUG_LOGS = enable
         self.enableDebugLogsChanged.emit()
+
+    alwaysAllowScreenshotsChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=alwaysAllowScreenshotsChanged)
+    def alwaysAllowScreenshots(self):
+        return self.config.GUI_QML_ALWAYS_ALLOW_SCREENSHOTS
+
+    @alwaysAllowScreenshots.setter
+    def alwaysAllowScreenshots(self, enable):
+        self.config.GUI_QML_ALWAYS_ALLOW_SCREENSHOTS = enable
+        self.alwaysAllowScreenshotsChanged.emit()
 
     useRecoverableChannelsChanged = pyqtSignal()
     @pyqtProperty(bool, notify=useRecoverableChannelsChanged)
@@ -233,6 +253,28 @@ class QEConfig(AuthMixin, QObject):
         if addresslistShowUsed != self.config.GUI_QML_ADDRESS_LIST_SHOW_USED:
             self.config.GUI_QML_ADDRESS_LIST_SHOW_USED = addresslistShowUsed
             self.addresslistShowUsedChanged.emit()
+
+    outputValueRoundingChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=outputValueRoundingChanged)
+    def outputValueRounding(self):
+        return self.config.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING
+
+    @outputValueRounding.setter
+    def outputValueRounding(self, outputValueRounding):
+        if outputValueRounding != self.config.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING:
+            self.config.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING = outputValueRounding
+            self.outputValueRoundingChanged.emit()
+
+    lightningPaymentFeeMaxMillionthsChanged = pyqtSignal()
+    @pyqtProperty(int, notify=lightningPaymentFeeMaxMillionthsChanged)
+    def lightningPaymentFeeMaxMillionths(self):
+        return self.config.LIGHTNING_PAYMENT_FEE_MAX_MILLIONTHS
+
+    @lightningPaymentFeeMaxMillionths.setter
+    def lightningPaymentFeeMaxMillionths(self, lightningPaymentFeeMaxMillionths):
+        if lightningPaymentFeeMaxMillionths != self.config.LIGHTNING_PAYMENT_FEE_MAX_MILLIONTHS:
+            self.config.LIGHTNING_PAYMENT_FEE_MAX_MILLIONTHS = lightningPaymentFeeMaxMillionths
+            self.lightningPaymentFeeMaxMillionthsChanged.emit()
 
     @pyqtSlot('qint64', result=str)
     @pyqtSlot(QEAmount, result=str)

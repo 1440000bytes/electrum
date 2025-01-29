@@ -43,7 +43,9 @@ Item {
 
         // Android based send dialog if on android
         var scanner = app.scanDialog.createObject(mainView, {
-            hint: qsTr('Scan an Invoice, an Address, an LNURL-pay, a PSBT or a Channel backup'),
+            hint: Daemon.currentWallet.isLightning
+                ? qsTr('Scan an Invoice, an Address, an LNURL-pay, a PSBT or a Channel Backup')
+                : qsTr('Scan an Invoice, an Address, an LNURL-pay or a PSBT')
         })
         scanner.onFound.connect(function() {
             var data = scanner.scanData
@@ -52,7 +54,7 @@ Item {
                 app.stack.push(Qt.resolvedUrl('TxDetails.qml'), { rawtx: data })
             } else if (Daemon.currentWallet.isValidChannelBackup(data)) {
                 var dialog = app.messageDialog.createObject(app, {
-                    title: qsTr('Import Channel backup?'),
+                    title: qsTr('Import Channel Backup?'),
                     yesno: true
                 })
                 dialog.accepted.connect(function() {
@@ -129,6 +131,38 @@ Item {
         Daemon.currentWallet.createRequest(qamt, _request_description, _request_expiry, lightning_only, reuse_address)
     }
 
+    function startSweep() {
+        var dialog = sweepDialog.createObject(app)
+        dialog.accepted.connect(function() {
+            var finalizerDialog = confirmSweepDialog.createObject(mainView, {
+                privateKeys: dialog.privateKeys,
+                message: qsTr('Sweep transaction'),
+                showOptions: false,
+                amountLabelText: qsTr('Total sweep amount'),
+                sendButtonText: qsTr('Sweep')
+            })
+            finalizerDialog.accepted.connect(function() {
+                if (Daemon.currentWallet.isWatchOnly) {
+                    var confirmdialog = app.messageDialog.createObject(mainView, {
+                        title: qsTr('Confirm Sweep'),
+                        text: qsTr('Current wallet is watch-only. You might not be able to spend from these addresses.\n\nAre you sure?'),
+                        yesno: true
+                    })
+                    confirmdialog.accepted.connect(function() {
+                        finalizerDialog.finalizer.send()
+                        close()
+                    })
+                    confirmdialog.open()
+                    return
+                }
+                console.log("Sending sweep transaction")
+                finalizerDialog.finalizer.send()
+            })
+            finalizerDialog.open()
+        })
+        dialog.open()
+    }
+
     property QtObject menu: Menu {
         id: menu
 
@@ -180,6 +214,18 @@ Item {
                 onTriggered: {
                     var dialog = app.signVerifyMessageDialog.createObject(app)
                     dialog.open()
+                    menu.deselect()
+                }
+            }
+        }
+
+        MenuItem {
+            icon.color: action.enabled ? 'transparent' : Material.iconDisabledColor
+            icon.source: '../../icons/sweep.png'
+            action: Action {
+                text: qsTr('Sweep key')
+                onTriggered: {
+                    startSweep()
                     menu.deselect()
                 }
             }
@@ -331,6 +377,7 @@ Item {
         onValidationError: (code, message) => {
             var dialog = app.messageDialog.createObject(app, {
                 title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
                 text: message
             })
             dialog.closed.connect(function() {
@@ -373,8 +420,9 @@ Item {
         onLnurlError: (code, message) => {
             var dialog = app.messageDialog.createObject(app, {
                 title: qsTr('Error'),
-                text: message }
-            )
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: message
+            })
             dialog.open()
         }
     }
@@ -413,7 +461,11 @@ Item {
         }
         function onRequestCreateError(error) {
             console.log(error)
-            var dialog = app.messageDialog.createObject(app, {text: error})
+            var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: error
+            })
             dialog.open()
         }
         function onOtpRequested() {
@@ -423,18 +475,26 @@ Item {
         }
         function onBroadcastFailed(txid, code, message) {
             var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
                 text: message
             })
             dialog.open()
         }
         function onPaymentFailed(invoice_id, message) {
             var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
                 text: message
             })
             dialog.open()
         }
         function onImportChannelBackupFailed(message) {
-            var dialog = app.messageDialog.createObject(app, { title: qsTr('Error'), text: message })
+            var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: message
+            })
             dialog.open()
         }
     }
@@ -494,13 +554,21 @@ Item {
             width: parent.width
             height: parent.height
 
-            onTxFound: {
+            onTxFound: (data) => {
                 app.stack.push(Qt.resolvedUrl('TxDetails.qml'), { rawtx: data })
                 close()
             }
-            onChannelBackupFound: {
+            onChannelBackupFound: (data) => {
+                if (!Daemon.currentWallet.isLightning) {
+                    var dialog = app.messageDialog.createObject(app, {
+                        title: qsTr('Cannot import Channel Backup, Lightning not enabled.')
+                    })
+                    dialog.open()
+                    return
+                }
+
                 var dialog = app.messageDialog.createObject(app, {
-                    title: qsTr('Import Channel backup?'),
+                    title: qsTr('Import Channel Backup?'),
                     yesno: true
                 })
                 dialog.accepted.connect(function() {
@@ -576,6 +644,14 @@ Item {
                     }
                     _confirmPaymentDialog.destroy()
                 }
+                onSignError: (message) => {
+                    var dialog = app.messageDialog.createObject(mainView, {
+                        title: qsTr('Error'),
+                        text: [qsTr('Could not sign tx'), message].join('\n\n'),
+                        iconSource: '../../../icons/warning.png'
+                    })
+                    dialog.open()
+                }
             }
             // TODO: lingering confirmPaymentDialogs can raise exceptions in
             // the child finalizer when currentWallet disappears, but we need
@@ -585,9 +661,18 @@ Item {
     }
 
     Component {
-        id: lightningPaymentProgressDialog
-        LightningPaymentProgressDialog {
-            onClosed: destroy()
+        id: confirmSweepDialog
+        ConfirmTxDialog {
+            id: _confirmSweepDialog
+
+            property string privateKeys
+            title: qsTr('Confirm Sweep')
+            satoshis: MAX
+            finalizer: SweepFinalizer {
+                wallet: Daemon.currentWallet
+                canRbf: true
+                privateKeys: _confirmSweepDialog.privateKeys
+            }
         }
     }
 
@@ -614,6 +699,13 @@ Item {
     Component {
         id: exportTxDialog
         ExportTxDialog {
+            onClosed: destroy()
+        }
+    }
+
+    Component {
+        id: sweepDialog
+        SweepDialog {
             onClosed: destroy()
         }
     }

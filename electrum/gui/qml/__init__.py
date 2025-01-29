@@ -6,23 +6,29 @@ from typing import TYPE_CHECKING
 
 try:
     import PyQt6
-except Exception:
-    sys.exit("Error: Could not import PyQt6. On Linux systems, you may try 'sudo apt-get install python3-pyqt6'")
+except Exception as e:
+    from electrum import GuiImportError
+    raise GuiImportError(
+        "Error: Could not import PyQt6. On Linux systems, "
+        "you may try 'sudo apt-get install python3-pyqt6'") from e
 
 try:
     import PyQt6.QtQml
-except Exception:
-    sys.exit("Error: Could not import PyQt6.QtQml. On Linux systems, you may try 'sudo apt-get install python3-pyqt6.qtquick'")
+except Exception as e:
+    from electrum import GuiImportError
+    raise GuiImportError(
+        "Error: Could not import PyQt6.QtQml. On Linux systems, "
+        "you may try 'sudo apt-get install python3-pyqt6.qtquick'") from e
 
-from PyQt6.QtCore import (Qt, QCoreApplication, QLocale, QTranslator, QTimer, QT_VERSION_STR, PYQT_VERSION_STR)
+from PyQt6.QtCore import (Qt, QCoreApplication, QLocale, QTimer, QT_VERSION_STR, PYQT_VERSION_STR)
 from PyQt6.QtGui import QGuiApplication
-sys._GUI_QT_VERSION = 6  # used by gui/common_qt
 
-from electrum.i18n import _
 from electrum.plugin import run_hook
 from electrum.util import profiler
 from electrum.logging import Logger
 from electrum.gui import BaseElectrumGui
+from electrum.gui.common_qt.i18n import ElectrumTranslator
+
 
 if TYPE_CHECKING:
     from electrum.daemon import Daemon
@@ -30,14 +36,6 @@ if TYPE_CHECKING:
     from electrum.plugin import Plugins
 
 from .qeapp import ElectrumQmlApplication, Exception_Hook
-
-
-class ElectrumTranslator(QTranslator):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-    def translate(self, context, source_text, disambiguation, n):
-        return _(source_text, context=context)
 
 
 class ElectrumGui(BaseElectrumGui, Logger):

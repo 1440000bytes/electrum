@@ -8,7 +8,7 @@ from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject
 from electrum.i18n import _
 from electrum.gui import messages
 from electrum.util import bfh
-from electrum.lnutil import extract_nodeid, ConnStringFormatError
+from electrum.lntransport import extract_nodeid, ConnStringFormatError
 from electrum.bitcoin import DummyAddress
 from electrum.lnworker import hardcoded_trampoline_nodes
 from electrum.logging import get_logger
@@ -23,7 +23,7 @@ from .qewallet import QEWallet
 class QEChannelOpener(QObject, AuthMixin):
     _logger = get_logger(__name__)
 
-    validationError = pyqtSignal([str,str], arguments=['code','message'])
+    validationError = pyqtSignal([str, str], arguments=['code', 'message'])
     conflictingBackup = pyqtSignal([str], arguments=['message'])
     channelOpening = pyqtSignal([str], arguments=['peer'])
     channelOpenError = pyqtSignal([str], arguments=['message'])

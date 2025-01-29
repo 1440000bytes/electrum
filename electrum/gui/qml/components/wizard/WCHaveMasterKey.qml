@@ -116,8 +116,12 @@ WizardComponent {
         Label {
             Layout.fillWidth: true
             text: cosigner
-                    ? qsTr('Enter cosigner master public key')
-                    : qsTr('Create keystore from a master key')
+                    ? [qsTr('Please enter the master public key (xpub) of your cosigner.'),
+                       qsTr('Enter their master private key (xprv) if you want to be able to sign for them.')
+                       ].join('\n')
+                    : [qsTr('Please enter your master private key (xprv).'),
+                       qsTr('You can also enter a public key (xpub) here, but be aware you will then create a watch-only wallet if all cosigners are added using public keys')
+                       ].join('\n')
             wrapMode: Text.Wrap
         }
 
@@ -129,8 +133,9 @@ WizardComponent {
                 font.family: FixedFont
                 wrapMode: TextEdit.WrapAnywhere
                 onTextChanged: {
-                    if (activeFocus)
+                    if (anyActiveFocus) {
                         verifyMasterKey(text)
+                    }
                 }
                 inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
                 background: PaneInsetBackground {

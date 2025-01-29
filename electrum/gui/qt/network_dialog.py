@@ -29,11 +29,11 @@ from enum import IntEnum
 from typing import Tuple, TYPE_CHECKING
 import threading
 
-from PyQt5.QtCore import Qt, pyqtSignal, QThread
-from PyQt5.QtWidgets import (QTreeWidget, QTreeWidgetItem, QMenu, QGridLayout, QComboBox,
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtWidgets import (QTreeWidget, QTreeWidgetItem, QMenu, QGridLayout, QComboBox,
                              QLineEdit, QDialog, QVBoxLayout, QHeaderView, QCheckBox,
                              QTabWidget, QWidget, QLabel)
-from PyQt5.QtGui import QIntValidator
+from PyQt6.QtGui import QIntValidator
 
 from electrum.i18n import _
 from electrum import constants, blockchain, util
@@ -86,9 +86,9 @@ class NetworkDialog(QDialog, QtEventListener):
 class NodesListWidget(QTreeWidget):
     """List of connected servers."""
 
-    SERVER_ADDR_ROLE = Qt.UserRole + 100
-    CHAIN_ID_ROLE = Qt.UserRole + 101
-    ITEMTYPE_ROLE = Qt.UserRole + 102
+    SERVER_ADDR_ROLE = Qt.ItemDataRole.UserRole + 100
+    CHAIN_ID_ROLE = Qt.ItemDataRole.UserRole + 101
+    ITEMTYPE_ROLE = Qt.ItemDataRole.UserRole + 102
 
     class ItemType(IntEnum):
         CHAIN = 0
@@ -96,15 +96,16 @@ class NodesListWidget(QTreeWidget):
         DISCONNECTED_SERVER = 2
         TOPLEVEL = 3
 
-    followServer = pyqtSignal([object], arguments=['server'])
+    followServer = pyqtSignal([ServerAddr], arguments=['server'])
     followChain = pyqtSignal([str], arguments=['chain_id'])
     setServer = pyqtSignal([str], arguments=['server'])
 
-    def __init__(self):
+    def __init__(self, *, network: Network):
         QTreeWidget.__init__(self)
         self.setHeaderLabels([_('Server'), _('Height')])
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.create_menu)
+        self.network = network
 
     def create_menu(self, position):
         item = self.currentItem()
@@ -112,16 +113,23 @@ class NodesListWidget(QTreeWidget):
             return
         item_type = item.data(0, self.ITEMTYPE_ROLE)
         menu = QMenu()
-        if item_type == self.ItemType.CONNECTED_SERVER:
+        if item_type in [self.ItemType.CONNECTED_SERVER, self.ItemType.DISCONNECTED_SERVER]:
             server = item.data(0, self.SERVER_ADDR_ROLE)  # type: ServerAddr
-            def do_follow_server():
-                self.followServer.emit(server)
-            menu.addAction(_("Use as server"), do_follow_server)
-        elif item_type == self.ItemType.DISCONNECTED_SERVER:
-            server = item.data(0, self.SERVER_ADDR_ROLE)  # type: ServerAddr
-            def do_set_server():
-                self.setServer.emit(str(server))
-            menu.addAction(_("Use as server"), do_set_server)
+            if item_type == self.ItemType.CONNECTED_SERVER:
+                def do_follow_server():
+                    self.followServer.emit(server)
+                menu.addAction(read_QIcon("chevron-right.png"), _("Use as server"), do_follow_server)
+            elif item_type == self.ItemType.DISCONNECTED_SERVER:
+                def do_set_server():
+                    self.setServer.emit(str(server))
+                menu.addAction(read_QIcon("chevron-right.png"), _("Use as server"), do_set_server)
+            def set_bookmark(*, add: bool):
+                self.network.set_server_bookmark(server, add=add)
+                self.update()
+            if self.network.is_server_bookmarked(server):
+                menu.addAction(read_QIcon("bookmark_remove.png"), _("Remove from bookmarks"), lambda: set_bookmark(add=False))
+            else:
+                menu.addAction(read_QIcon("bookmark_add.png"), _("Bookmark this server"), lambda: set_bookmark(add=True))
         elif item_type == self.ItemType.CHAIN:
             chain_id = item.data(0, self.CHAIN_ID_ROLE)
             def do_follow_chain():
@@ -129,10 +137,10 @@ class NodesListWidget(QTreeWidget):
             menu.addAction(_("Follow this branch"), do_follow_chain)
         else:
             return
-        menu.exec_(self.viewport().mapToGlobal(position))
+        menu.exec(self.viewport().mapToGlobal(position))
 
     def keyPressEvent(self, event):
-        if event.key() in [Qt.Key_F2, Qt.Key_Return, Qt.Key_Enter]:
+        if event.key() in [Qt.Key.Key_F2, Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.on_activated(self.currentItem(), self.currentColumn())
         else:
             QTreeWidget.keyPressEvent(self, event)
@@ -143,10 +151,12 @@ class NodesListWidget(QTreeWidget):
         pt.setX(50)
         self.customContextMenuRequested.emit(pt)
 
-    def update(self, *, network: Network, servers: dict):
+    def update(self):
         self.clear()
+        network = self.network
+        servers = self.network.get_servers()
 
-        use_tor = network.tor_proxy
+        use_tor = bool(network.is_proxy_tor)
 
         # connected servers
         connected_servers_item = QTreeWidgetItem([_("Connected nodes"), ''])
@@ -171,6 +181,8 @@ class NodesListWidget(QTreeWidget):
                 item.setToolTip(0, str(i.server))
                 if i == network.interface:
                     item.setIcon(0, read_QIcon("chevron-right.png"))
+                elif network.is_server_bookmarked(i.server):
+                    item.setIcon(0, read_QIcon("bookmark.png"))
                 x.addChild(item)
             if n_chains > 1:
                 connected_servers_item.addChild(x)
@@ -180,18 +192,22 @@ class NodesListWidget(QTreeWidget):
         disconnected_servers_item.setData(0, self.ITEMTYPE_ROLE, self.ItemType.TOPLEVEL)
         connected_hosts = set([iface.host for ifaces in chains.values() for iface in ifaces])
         protocol = PREFERRED_NETWORK_PROTOCOL
-        for _host, d in sorted(servers.items()):
-            if _host in connected_hosts:
+        server_addrs = [
+            ServerAddr(_host, port, protocol=protocol)
+            for _host, d in servers.items()
+            if (port := d.get(protocol))]
+        server_addrs.sort(key=lambda x: (-network.is_server_bookmarked(x), str(x)))
+        for server in server_addrs:
+            if server.host in connected_hosts:
                 continue
-            if _host.endswith('.onion') and not use_tor:
+            if server.host.endswith('.onion') and not use_tor:
                 continue
-            port = d.get(protocol)
-            if port:
-                server = ServerAddr(_host, port, protocol=protocol)
-                item = QTreeWidgetItem([server.net_addr_str(), ""])
-                item.setData(0, self.ITEMTYPE_ROLE, self.ItemType.DISCONNECTED_SERVER)
-                item.setData(0, self.SERVER_ADDR_ROLE, server)
-                disconnected_servers_item.addChild(item)
+            item = QTreeWidgetItem([server.net_addr_str(), ""])
+            item.setData(0, self.ITEMTYPE_ROLE, self.ItemType.DISCONNECTED_SERVER)
+            item.setData(0, self.SERVER_ADDR_ROLE, server)
+            if network.is_server_bookmarked(server):
+                item.setIcon(0, read_QIcon("bookmark.png"))
+            disconnected_servers_item.addChild(item)
 
         self.addTopLevelItem(connected_servers_item)
         self.addTopLevelItem(disconnected_servers_item)
@@ -204,8 +220,8 @@ class NodesListWidget(QTreeWidget):
         # headers
         h = self.header()
         h.setStretchLastSection(False)
-        h.setSectionResizeMode(0, QHeaderView.Stretch)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
 
         super().update()
 
@@ -319,7 +335,7 @@ class NetworkChoiceLayout(object):
         self.split_label = QLabel('')
         grid.addWidget(self.split_label, 4, 0, 1, 3)
 
-        self.nodes_list_widget = NodesListWidget()
+        self.nodes_list_widget = NodesListWidget(network=self.network)
         self.nodes_list_widget.followServer.connect(self.follow_server)
         self.nodes_list_widget.followChain.connect(self.follow_branch)
 
@@ -382,8 +398,7 @@ class NetworkChoiceLayout(object):
         else:
             msg = ''
         self.split_label.setText(msg)
-        self.nodes_list_widget.update(network=self.network,
-                                      servers=self.network.get_servers())
+        self.nodes_list_widget.update()
         self.enable_set_server()
 
     def fill_in_proxy_settings(self):
@@ -432,8 +447,6 @@ class NetworkChoiceLayout(object):
         net_params = self.network.get_parameters()
         if self.proxy_cb.isChecked():
             if not self.proxy_port.hasAcceptableInput():
-                return
-            if ':' in self.proxy_host.text():  # avoid deserialization pitfall
                 return
             proxy = {'mode':str(self.proxy_mode.currentText()).lower(),
                      'host':str(self.proxy_host.text()),
@@ -607,7 +620,7 @@ class ServerWidget(QWidget, QtEventListener):
 
         self.layout().addLayout(grid)
 
-        self.nodes_list_widget = NodesListWidget()
+        self.nodes_list_widget = NodesListWidget(network=self.network)
         self.nodes_list_widget.followServer.connect(self.follow_server)
         self.nodes_list_widget.followChain.connect(self.follow_branch)
 
@@ -617,15 +630,14 @@ class ServerWidget(QWidget, QtEventListener):
         self.nodes_list_widget.setServer.connect(do_set_server)
 
         self.layout().addWidget(self.nodes_list_widget)
-        self.nodes_list_widget.update(network=self.network,
-                                      servers=self.network.get_servers())
+        self.nodes_list_widget.update()
 
         self.register_callbacks()
         self.destroyed.connect(lambda: self.unregister_callbacks())
 
     @qt_event_listener
     def on_event_network_updated(self):
-        self.nodes_list_widget.update(network=self.network, servers=self.network.get_servers())
+        self.nodes_list_widget.update()
 
     def follow_branch(self, chain_id):
         self.network.run_from_another_thread(self.network.follow_chain_given_id(chain_id))

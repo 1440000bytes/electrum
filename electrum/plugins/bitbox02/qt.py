@@ -2,8 +2,8 @@ import threading
 from functools import partial
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import Qt, QMetaObject, Q_RETURN_ARG, pyqtSlot, pyqtSignal
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QLineEdit, QHBoxLayout
+from PyQt6.QtCore import Qt, QMetaObject, Q_RETURN_ARG, pyqtSlot, pyqtSignal
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QLineEdit, QHBoxLayout
 
 from electrum.i18n import _
 from electrum.plugin import hook
@@ -83,7 +83,7 @@ class BitBox02_Handler(QtHandlerBase):
         super(BitBox02_Handler, self).__init__(win, "BitBox02")
 
     def name_multisig_account(self):
-        return QMetaObject.invokeMethod(self, "_name_multisig_account", Qt.BlockingQueuedConnection, Q_RETURN_ARG(str))
+        return QMetaObject.invokeMethod(self, "_name_multisig_account", Qt.ConnectionType.BlockingQueuedConnection, Q_RETURN_ARG(str))
 
     @pyqtSlot(result=str)
     def _name_multisig_account(self):
@@ -109,7 +109,7 @@ class BitBox02_Handler(QtHandlerBase):
         vbox.addLayout(he)
         vbox.addLayout(hlb)
         dialog.setLayout(vbox)
-        dialog.exec_()
+        dialog.exec()
         return name.text().strip()
 
 
@@ -122,7 +122,8 @@ class WCBitbox02ScriptAndDerivation(WCScriptAndDerivation):
 
     def on_ready(self):
         super().on_ready()
-        _name, _info = self.wizard_data['hardware_device']
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        _name, _info = current_cosigner['hardware_device']
         plugin = self.wizard.plugins.get_plugin(_info.plugin_name)
 
         device_id = _info.device.id_
@@ -149,6 +150,7 @@ class WCBitbox02ScriptAndDerivation(WCScriptAndDerivation):
                 self.error = str(e)
             except Exception as e:
                 self.error = repr(e)
+                self.logger.exception(repr(e))
             finally:
                 self.busy = False
 

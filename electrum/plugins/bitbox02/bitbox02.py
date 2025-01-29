@@ -5,6 +5,8 @@
 import hid
 from typing import TYPE_CHECKING, Dict, Tuple, Optional, List, Any, Callable
 
+import electrum_ecc as ecc
+
 from electrum import bip32, constants
 from electrum.i18n import _
 from electrum.keystore import Hardware_KeyStore
@@ -18,7 +20,6 @@ from electrum.storage import get_derivation_used_for_hw_device_encryption
 from electrum.bitcoin import OnchainOutputType
 
 import electrum.bitcoin as bitcoin
-import electrum.ecc as ecc
 
 from ..hw_wallet import HW_PluginBase, HardwareClientBase, HardwareHandlerBase
 
@@ -202,6 +203,14 @@ class BitBox02Client(HardwareClientBase):
 
     @runs_in_hwd_thread
     def get_password_for_storage_encryption(self) -> str:
+        if self.bitbox02_device is None:
+            self.pairing_dialog()
+
+        if self.bitbox02_device is None:
+            raise Exception(
+                "Need to setup communication first before attempting any BitBox02 calls"
+            )
+
         derivation = get_derivation_used_for_hw_device_encryption()
         derivation_list = bip32.convert_bip32_strpath_to_intpath(derivation)
         xpub = self.bitbox02_device.electrum_encryption_key(derivation_list)
@@ -326,7 +335,7 @@ class BitBox02Client(HardwareClientBase):
             except bitbox02.DuplicateEntryException:
                 raise
             except Exception:
-                raise UserFacingException("Failed to register multisig\naccount configuration on BitBox02")
+                raise UserFacingException(_('Failed to register multisig\naccount configuration on BitBox02'))
         return multisig_config
 
     @runs_in_hwd_thread
@@ -464,9 +473,7 @@ class BitBox02Client(HardwareClientBase):
                 raise Exception("Can only use p2wsh-p2sh or p2wsh with multisig wallets")
         else:
             raise UserFacingException(
-                "invalid input script type: {} is not supported by the BitBox02".format(
-                    tx_script_type
-                )
+                _('Invalid input script type: {} is not supported by the BitBox02').format(tx_script_type)
             )
 
         # Build BTCOutputType list
@@ -495,7 +502,7 @@ class BitBox02Client(HardwareClientBase):
                     output_type = bitbox02.btc.P2TR
                 else:
                     raise UserFacingException(
-                        "Received unsupported output type during transaction signing: {} is not supported by the BitBox02".format(
+                        _('Received unsupported output type during transaction signing: {} is not supported by the BitBox02').format(
                             addrtype
                         )
                     )
@@ -530,8 +537,8 @@ class BitBox02Client(HardwareClientBase):
         # Fill signatures
         if len(sigs) != len(tx.inputs()):
             raise Exception("Incorrect number of inputs signed.")  # Should never occur
-        sighash = Sighash.to_sigbytes(Sighash.ALL).hex()
-        signatures = [ecc.der_sig_from_sig_string(x[1]).hex() + sighash for x in sigs]
+        sighash = Sighash.to_sigbytes(Sighash.ALL)
+        signatures = [ecc.ecdsa_der_sig_from_ecdsa_sig64(x[1]) + sighash for x in sigs]
         tx.update_signatures(signatures)
 
     def sign_message(self, keypath: str, message: bytes, script_type: str) -> bytes:
@@ -546,9 +553,9 @@ class BitBox02Client(HardwareClientBase):
                 "p2wpkh": bitbox02.btc.BTCScriptConfig.P2WPKH,
             }[script_type]
         except KeyError:
-            raise UserFacingException("The BitBox02 does not support signing messages for this address type: {}".format(script_type))
+            raise UserFacingException(_('The BitBox02 does not support signing messages for this address type: {}').format(script_type))
 
-        _, _, signature = self.bitbox02_device.btc_sign_msg(
+        _a, _b, signature = self.bitbox02_device.btc_sign_msg(
             self._get_coin(),
             bitbox02.btc.BTCScriptConfigWithKeypath(
                 script_config=bitbox02.btc.BTCScriptConfig(
@@ -580,9 +587,7 @@ class BitBox02_KeyStore(Hardware_KeyStore):
 
     def decrypt_message(self, pubkey, message, password):
         raise UserFacingException(
-            _(
-                "Message encryption, decryption and signing are currently not supported for {}"
-            ).format(self.device)
+            _('Message encryption, decryption and signing are currently not supported for {}').format(self.device)
         )
 
     def sign_message(self, sequence, message, password, *, script_type=None):

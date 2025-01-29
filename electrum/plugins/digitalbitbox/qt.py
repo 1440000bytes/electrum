@@ -2,7 +2,7 @@ import threading
 from functools import partial
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 
 from electrum.i18n import _
 from electrum.plugin import hook
@@ -69,6 +69,10 @@ class DigitalBitbox_Handler(QtHandlerBase):
     def __init__(self, win):
         super(DigitalBitbox_Handler, self).__init__(win, 'Digital Bitbox')
 
+    def query_choice(self, msg, labels):
+        choices = [(i, v) for i, v in enumerate(labels)]
+        return QtHandlerBase.query_choice(self, msg, choices)
+
 
 class WCDigitalBitboxScriptAndDerivation(WCScriptAndDerivation):
     requestRecheck = pyqtSignal()
@@ -83,7 +87,8 @@ class WCDigitalBitboxScriptAndDerivation(WCScriptAndDerivation):
 
     def on_ready(self):
         super().on_ready()
-        _name, _info = self.wizard_data['hardware_device']
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        _name, _info = current_cosigner['hardware_device']
         plugin = self.wizard.plugins.get_plugin(_info.plugin_name)
 
         device_id = _info.device.id_

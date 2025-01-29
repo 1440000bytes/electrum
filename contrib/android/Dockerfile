@@ -81,10 +81,11 @@ RUN apt -y update -qq \
 RUN yes | ${ANDROID_SDK_MANAGER} --licenses > /dev/null
 
 
+ENV ANDROID_SDK_BUILD_TOOLS_MAJOR_V="31"
 ENV ANDROID_SDK_BUILD_TOOLS_VERSION="31.0.0"
 
 # download platforms, API, build tools
-RUN ${ANDROID_SDK_MANAGER} "platforms;android-31" > /dev/null && \
+RUN ${ANDROID_SDK_MANAGER} "platforms;android-${ANDROID_SDK_BUILD_TOOLS_MAJOR_V}" > /dev/null && \
     ${ANDROID_SDK_MANAGER} "build-tools;${ANDROID_SDK_BUILD_TOOLS_VERSION}" > /dev/null && \
     ${ANDROID_SDK_MANAGER} "extras;android;m2repository" > /dev/null && \
     chmod +x "${ANDROID_SDK_HOME}/cmdline-tools/bin/avdmanager"
@@ -108,8 +109,8 @@ RUN curl --location --progress-bar \
 
 # install system/build dependencies
 # https://github.com/kivy/buildozer/blob/master/docs/source/installation.rst#android-on-ubuntu-2004-64bit
-RUN apt -y update -qq \
-    && apt -y install -qq --no-install-recommends --allow-downgrades \
+RUN apt -y update -q \
+    && apt -y install -q --no-install-recommends --allow-downgrades \
         python3 \
         python3-dev \
         python3-pip \
@@ -123,9 +124,11 @@ RUN apt -y update -qq \
         git \
         zip \
         unzip \
+        rsync \
         build-essential \
         ccache \
         autoconf \
+        autopoint \
         libtool \
         pkg-config \
         zlib1g-dev \
@@ -165,7 +168,7 @@ RUN chown --recursive ${USER} ${WORK_DIR} ${ANDROID_SDK_HOME}
 RUN chown ${USER} /opt
 USER ${USER}
 
-# venv, VIRTUAL_ENV is used by buildozer to indicate a venv environemnt
+# venv, VIRTUAL_ENV is used by buildozer to indicate a venv environment
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
@@ -178,26 +181,21 @@ RUN /opt/venv/bin/python3 -m pip install --no-build-isolation --no-dependencies 
     -r /opt/deterministic-build/requirements-build-android.txt
 
 # install buildozer
+ENV BUILDOZER_CHECKOUT_COMMIT="4403ecf445f10b5fbf7c74f4621bf2b922ad35b5"
+# ^ from branch electrum_20240930 (note: careful with force-pushing! see #8162)
 RUN cd /opt \
-    && git clone https://github.com/kivy/buildozer \
+    && git clone https://github.com/spesmilo/buildozer \
     && cd buildozer \
-    && git remote add sombernight https://github.com/SomberNight/buildozer \
-    && git remote add accumulator https://github.com/accumulator/buildozer \
-    && git fetch --all \
-    # commit: from branch electrum-qt6 (note: careful with force-pushing! see #8162) \
-    && git checkout "ce4f2257249fdf4ff1f4cb8983fd7ac44174a274^{commit}" \
+    && git checkout "${BUILDOZER_CHECKOUT_COMMIT}^{commit}" \
     && /opt/venv/bin/python3 -m pip install --no-build-isolation --no-dependencies -e .
 
 # install python-for-android
+ENV P4A_CHECKOUT_COMMIT="0ab0d872e6c6b88ddc05b9c4ba6fcd3aa7921242"
+# ^ from branch electrum_20240930 (note: careful with force-pushing! see #8162)
 RUN cd /opt \
-    && git clone https://github.com/kivy/python-for-android \
+    && git clone https://github.com/spesmilo/python-for-android \
     && cd python-for-android \
-    && git remote add sombernight https://github.com/SomberNight/python-for-android \
-    && git remote add accumulator https://github.com/accumulator/python-for-android \
-    && git fetch --all \
-    # commit: from branch accumulator/qt6-wip (note: careful with force-pushing! see #8162) \
-    #
-    && git checkout "eb4a3522373e0b4e2749b8a8bc965ff51355ea35^{commit}" \
+    && git checkout "${P4A_CHECKOUT_COMMIT}^{commit}" \
     && /opt/venv/bin/python3 -m pip install --no-build-isolation --no-dependencies -e .
 
 # build env vars

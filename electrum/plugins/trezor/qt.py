@@ -2,8 +2,8 @@ from functools import partial
 import threading
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import Qt, QEventLoop, pyqtSignal
-from PyQt5.QtWidgets import (QVBoxLayout, QLabel, QGridLayout, QPushButton,
+from PyQt6.QtCore import Qt, QEventLoop, pyqtSignal
+from PyQt6.QtWidgets import (QVBoxLayout, QLabel, QGridLayout, QPushButton,
                              QHBoxLayout, QButtonGroup, QGroupBox, QDialog,
                              QLineEdit, QRadioButton, QCheckBox, QWidget,
                              QMessageBox, QSlider, QTabWidget)
@@ -14,15 +14,15 @@ from electrum.plugin import hook
 from electrum.keystore import ScriptTypeNotSupported
 
 from electrum.plugins.hw_wallet.qt import QtHandlerBase, QtPluginBase
+from electrum.plugins.hw_wallet.trezor_qt_pinmatrix import PinMatrixWidget
 from electrum.plugins.hw_wallet.plugin import only_hook_if_libraries_available, OutdatedHwFirmwareException
 
 from electrum.gui.qt.util import (WindowModalDialog, WWLabel, Buttons, CancelButton,
                                   OkButton, CloseButton, PasswordLineEdit, getOpenFileName, ChoiceWidget)
-from electrum.gui.qt.wizard.wallet import WCScriptAndDerivation, WCHWUnlock, WCHWXPub
-from electrum.gui.qt.wizard.wizard import WizardComponent
+from electrum.gui.qt.wizard.wallet import WCScriptAndDerivation, WCHWUnlock, WCHWXPub, WalletWizardComponent
 
 from .trezor import (TrezorPlugin, TIM_NEW, TIM_RECOVER, TrezorInitSettings,
-                     PASSPHRASE_ON_DEVICE, Capability, BackupType, RecoveryDeviceType)
+                     PASSPHRASE_ON_DEVICE, Capability, BackupType, RecoveryDeviceInputMethod)
 
 if TYPE_CHECKING:
     from electrum.gui.qt.wizard.wallet import QENewWalletWizard
@@ -75,9 +75,9 @@ class MatrixDialog(WindowModalDialog):
         vbox.addLayout(grid)
 
         self.backspace_button = QPushButton("<=")
-        self.backspace_button.clicked.connect(partial(self.process_key, Qt.Key_Backspace))
+        self.backspace_button.clicked.connect(partial(self.process_key, Qt.Key.Key_Backspace))
         self.cancel_button = QPushButton(_("Cancel"))
-        self.cancel_button.clicked.connect(partial(self.process_key, Qt.Key_Escape))
+        self.cancel_button.clicked.connect(partial(self.process_key, Qt.Key.Key_Escape))
         buttons = Buttons(self.backspace_button, self.cancel_button)
         vbox.addSpacing(40)
         vbox.addLayout(buttons)
@@ -93,9 +93,9 @@ class MatrixDialog(WindowModalDialog):
 
     def process_key(self, key):
         self.data = None
-        if key == Qt.Key_Backspace:
+        if key == Qt.Key.Key_Backspace:
             self.data = '\010'
-        elif key == Qt.Key_Escape:
+        elif key == Qt.Key.Key_Escape:
             self.data = 'x'
         elif self.is_valid(key):
             self.char_buttons[key - ord('1')].setFocus()
@@ -111,7 +111,7 @@ class MatrixDialog(WindowModalDialog):
     def get_matrix(self, num):
         self.num = num
         self.refresh()
-        self.loop.exec_()
+        self.loop.exec()
 
 
 class QtHandler(QtHandlerBase):
@@ -162,7 +162,7 @@ class QtHandler(QtHandlerBase):
         vbox.addWidget(matrix)
         vbox.addLayout(Buttons(CancelButton(dialog), OkButton(dialog)))
         dialog.setLayout(vbox)
-        dialog.exec_()
+        dialog.exec()
         self.response = str(matrix.get_value())
         self.done.set()
 
@@ -233,7 +233,7 @@ class QtHandler(QtHandlerBase):
         OnDevice_button.clicked.connect(on_device_clicked)
         OnDevice_button.clicked.connect(d.accept)
 
-        d.exec_()
+        d.exec()
         self.done.set()
 
 
@@ -260,7 +260,7 @@ class QtPlugin(QtPluginBase):
             return device_id
         def show_dialog(device_id):
             if device_id:
-                SettingsDialog(window, self, keystore, device_id).exec_()
+                SettingsDialog(window, self, keystore, device_id).exec()
         keystore.thread.add(connect, on_success=show_dialog)
 
 
@@ -410,14 +410,14 @@ class InitSettingsLayout(QVBoxLayout):
             rb1 = QRadioButton(gb_rectype)
             rb1.setText(_('Scrambled words'))
             self.bg_rectype.addButton(rb1)
-            self.bg_rectype.setId(rb1, RecoveryDeviceType.ScrambledWords)
+            self.bg_rectype.setId(rb1, RecoveryDeviceInputMethod.ScrambledWords)
             hbox_rectype.addWidget(rb1)
             rb1.setChecked(True)
 
             rb2 = QRadioButton(gb_rectype)
             rb2.setText(_('Matrix'))
             self.bg_rectype.addButton(rb2)
-            self.bg_rectype.setId(rb2, RecoveryDeviceType.Matrix)
+            self.bg_rectype.setId(rb2, RecoveryDeviceInputMethod.Matrix)
             hbox_rectype.addWidget(rb2)
 
         # no backup
@@ -425,8 +425,15 @@ class InitSettingsLayout(QVBoxLayout):
         if method == TIM_NEW:
             self.cb_no_backup = QCheckBox(_('Enable seedless mode'))
             self.cb_no_backup.setChecked(False)
-            if (model == '1' and fw_version >= (1, 7, 1)
-                    or model == 'T' and fw_version >= (2, 0, 9)):
+            supports_no_backup = False
+            if model == '1':
+                if fw_version >= (1, 7, 1):
+                    supports_no_backup = True
+            else:
+                if fw_version >= (2, 0, 9):
+                    supports_no_backup = True
+            if supports_no_backup:
+                self.cb_no_backup.setEnabled(True)
                 self.cb_no_backup.setToolTip(SEEDLESS_MODE_WARNING)
             else:
                 self.cb_no_backup.setEnabled(False)
@@ -456,7 +463,6 @@ class Plugin(TrezorPlugin, QtPlugin):
 
     @classmethod
     def pin_matrix_widget_class(self):
-        from trezorlib.qt.pinmatrix import PinMatrixWidget
         return PinMatrixWidget
 
     @hook
@@ -613,7 +619,7 @@ class SettingsDialog(WindowModalDialog):
                 msg = _("Are you SURE you want to wipe the device?\n"
                         "Your wallet still has bitcoins in it!")
                 if not self.question(msg, title=title,
-                                     icon=QMessageBox.Critical):
+                                     icon=QMessageBox.Icon.Critical):
                     return
             invoke_client('wipe_device', unpair_after=True)
 
@@ -715,11 +721,11 @@ class SettingsDialog(WindowModalDialog):
         # Settings tab - Session Timeout
         timeout_label = QLabel(_("Session Timeout"))
         timeout_minutes = QLabel()
-        timeout_slider = QSlider(Qt.Horizontal)
+        timeout_slider = QSlider(Qt.Orientation.Horizontal)
         timeout_slider.setRange(1, 60)
         timeout_slider.setSingleStep(1)
         timeout_slider.setTickInterval(5)
-        timeout_slider.setTickPosition(QSlider.TicksBelow)
+        timeout_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         timeout_slider.setTracking(True)
         timeout_msg = QLabel(
             _("Clear the session after the specified period "
@@ -800,7 +806,8 @@ class WCTrezorXPub(WCHWXPub):
         WCHWXPub.__init__(self, parent, wizard)
 
     def get_xpub_from_client(self, client, derivation, xtype):
-        _name, _info = self.wizard_data['hardware_device']
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        _name, _info = current_cosigner['hardware_device']
         if xtype not in self.plugin.SUPPORTED_XTYPES:
             raise ScriptTypeNotSupported(_('This type of script is not supported with {}').format(_info.model_name))
         if not client.is_uptodate():
@@ -811,18 +818,25 @@ class WCTrezorXPub(WCHWXPub):
         return client.get_xpub(derivation, xtype, True)
 
 
-class WCTrezorInitMethod(WizardComponent, Logger):
+class WCTrezorInitMethod(WalletWizardComponent, Logger):
     def __init__(self, parent, wizard):
-        WizardComponent.__init__(self, parent, wizard, title=_('HW Setup'))
+        WalletWizardComponent.__init__(self, parent, wizard, title=_('Trezor Setup'))
         Logger.__init__(self)
         self.plugins = wizard.plugins
         self.plugin = None
 
     def on_ready(self):
-        _name, _info = self.wizard_data['hardware_device']
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        _name, _info = current_cosigner['hardware_device']
         self.plugin = self.plugins.get_plugin(_info.plugin_name)
         device_id = _info.device.id_
         client = self.plugins.device_manager.client_by_id(device_id, scan_now=False)
+        if client.features.bootloader_mode:
+            msg = (_("Looks like your device is in bootloader mode. Try reconnecting it.\n"
+                     "If you haven't installed a firmware on it yet, you can download it from {}")
+                   .format(self.plugin.firmware_URL))
+            self.error = msg
+            return
         if not client.is_uptodate():
             msg = (_('Outdated {} firmware for device labelled {}. Please '
                      'download the updated firmware from {}')
@@ -843,18 +857,22 @@ class WCTrezorInitMethod(WizardComponent, Logger):
         self._valid = True
 
     def apply(self):
-        self.wizard_data['trezor_init'] = self.choice_w.selected_item[0]
+        if not self.valid:
+            return
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        current_cosigner['trezor_init'] = self.choice_w.selected_key
 
 
-class WCTrezorInitParams(WizardComponent):
+class WCTrezorInitParams(WalletWizardComponent):
     def __init__(self, parent, wizard):
-        WizardComponent.__init__(self, parent, wizard, title=_('Set-up trezor'))
+        WalletWizardComponent.__init__(self, parent, wizard, title=_('Trezor Setup'))
         self.plugins = wizard.plugins
         self._busy = True
 
     def on_ready(self):
-        _name, _info = self.wizard_data['hardware_device']
-        self.settings_layout = InitSettingsLayout(self.plugins.device_manager, self.wizard_data['trezor_init'], _info.device.id_)
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        _name, _info = current_cosigner['hardware_device']
+        self.settings_layout = InitSettingsLayout(self.plugins.device_manager, current_cosigner['trezor_init'], _info.device.id_)
         self.layout().addLayout(self.settings_layout)
         self.layout().addStretch(1)
 
@@ -862,12 +880,13 @@ class WCTrezorInitParams(WizardComponent):
         self.busy = False
 
     def apply(self):
-        self.wizard_data['trezor_settings'] = self.settings_layout.get_settings()
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        current_cosigner['trezor_settings'] = self.settings_layout.get_settings()
 
 
-class WCTrezorInit(WizardComponent, Logger):
+class WCTrezorInit(WalletWizardComponent, Logger):
     def __init__(self, parent, wizard):
-        WizardComponent.__init__(self, parent, wizard, title=_('Set-up trezor'))
+        WalletWizardComponent.__init__(self, parent, wizard, title=_('Trezor Setup'))
         Logger.__init__(self)
         self.plugins = wizard.plugins
         self.plugin = self.plugins.get_plugin('trezor')
@@ -877,9 +896,10 @@ class WCTrezorInit(WizardComponent, Logger):
         self._busy = True
 
     def on_ready(self):
-        settings = self.wizard_data['trezor_settings']
-        method = self.wizard_data['trezor_init']
-        _name, _info = self.wizard_data['hardware_device']
+        current_cosigner = self.wizard.current_cosigner(self.wizard_data)
+        settings = current_cosigner['trezor_settings']
+        method = current_cosigner['trezor_init']
+        _name, _info = current_cosigner['hardware_device']
         device_id = _info.device.id_
         client = self.plugins.device_manager.client_by_id(device_id, scan_now=False)
         client.handler = self.plugin.create_handler(self.wizard)
@@ -893,6 +913,7 @@ class WCTrezorInit(WizardComponent, Logger):
             except Exception as e:
                 self.valid = False
                 self.error = repr(e)
+                self.logger.exception(repr(e))
             finally:
                 self.busy = False
 

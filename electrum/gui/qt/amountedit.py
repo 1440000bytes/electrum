@@ -3,14 +3,14 @@
 from decimal import Decimal
 from typing import Union
 
-from PyQt5.QtCore import pyqtSignal, Qt, QSize
-from PyQt5.QtGui import QPalette, QPainter
-from PyQt5.QtWidgets import (QLineEdit, QStyle, QStyleOptionFrame, QSizePolicy)
+from PyQt6.QtCore import pyqtSignal, Qt, QSize
+from PyQt6.QtGui import QPalette, QPainter
+from PyQt6.QtWidgets import (QLineEdit, QStyle, QStyleOptionFrame, QSizePolicy)
 
 from .util import char_width_in_lineedit, ColorScheme
 
 from electrum.util import (format_satoshis_plain, decimal_point_to_base_unit_name,
-                           FEERATE_PRECISION, quantize_feerate, DECIMAL_POINT)
+                           FEERATE_PRECISION, quantize_feerate, DECIMAL_POINT, UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE)
 from electrum.bitcoin import COIN, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC
 
 _NOT_GIVEN = object()  # sentinel value
@@ -32,7 +32,7 @@ class SizedFreezableLineEdit(FreezableLineEdit):
     def __init__(self, *, width: int, parent=None):
         super().__init__(parent)
         self._width = width
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMaximumWidth(width)
 
     def sizeHint(self) -> QSize:
@@ -88,11 +88,11 @@ class AmountEdit(SizedFreezableLineEdit):
         if self.base_unit:
             panel = QStyleOptionFrame()
             self.initStyleOption(panel)
-            textRect = self.style().subElementRect(QStyle.SE_LineEditContents, panel, self)
+            textRect = self.style().subElementRect(QStyle.SubElement.SE_LineEditContents, panel, self)
             textRect.adjust(2, 0, -10, 0)
             painter = QPainter(self)
             painter.setPen(ColorScheme.GRAY.as_color())
-            painter.drawText(textRect, int(Qt.AlignRight | Qt.AlignVCenter), self.base_unit())
+            painter.drawText(textRect, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), self.base_unit())
 
     def _get_amount_from_text(self, text: str) -> Union[None, Decimal, int]:
         try:
@@ -165,7 +165,7 @@ class FeerateEdit(BTCAmountEdit):
         self.extra_precision = FEERATE_PRECISION
 
     def _base_unit(self):
-        return 'sat/byte'
+        return UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE
 
     def _get_amount_from_text(self, text):
         sat_per_byte_amount = super()._get_amount_from_text(text)

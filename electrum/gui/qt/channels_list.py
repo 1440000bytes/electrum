@@ -4,12 +4,12 @@ import enum
 from typing import Sequence, Optional, Dict, TYPE_CHECKING
 from abc import abstractmethod, ABC
 
-from PyQt5 import QtCore, QtGui
-from PyQt5.QtCore import Qt, QRect, QSize
-from PyQt5.QtWidgets import (QMenu, QHBoxLayout, QLabel, QVBoxLayout, QGridLayout, QLineEdit,
+from PyQt6 import QtCore, QtGui
+from PyQt6.QtCore import Qt, QRect, QSize
+from PyQt6.QtWidgets import (QMenu, QHBoxLayout, QLabel, QVBoxLayout, QGridLayout, QLineEdit,
                              QPushButton, QAbstractItemView, QComboBox, QCheckBox,
                              QToolTip)
-from PyQt5.QtGui import QFont, QStandardItem, QBrush, QPainter, QIcon, QHelpEvent
+from PyQt6.QtGui import QFont, QStandardItem, QBrush, QPainter, QIcon, QHelpEvent
 
 from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates
 from electrum.i18n import _
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .main_window import ElectrumWindow
 
 
-ROLE_CHANNEL_ID = Qt.UserRole
+ROLE_CHANNEL_ID = Qt.ItemDataRole.UserRole
 
 
 class ChannelsList(MyTreeView):
@@ -73,7 +73,7 @@ class ChannelsList(MyTreeView):
             stretch_column=self.Columns.NODE_ALIAS,
         )
         self.setModel(QtGui.QStandardItemModel(self))
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.gossip_db_loaded.connect(self.on_gossip_db)
         self.update_rows.connect(self.do_update_rows)
         self.update_single_row.connect(self.do_update_single_row)
@@ -119,9 +119,6 @@ class ChannelsList(MyTreeView):
     def on_channel_closed(self, txid):
         self.main_window.show_error('Channel closed' + '\n' + txid)
 
-    def on_request_sent(self, b):
-        self.main_window.show_message(_('Request sent'))
-
     def on_failure(self, exc_info):
         type_, e, tb = exc_info
         traceback.print_tb(tb)
@@ -137,13 +134,13 @@ class ChannelsList(MyTreeView):
         on_success = self.on_channel_closed
         def task():
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, on_success, self.on_failure)
+        WaitingDialog(self, _('Please wait...'), task, on_success, self.on_failure)
 
     def force_close(self, channel_id):
         self.save_backup = True
         backup_cb = QCheckBox('Create a backup now', checked=True)
-        def on_checked(b):
-            self.save_backup = bool(b)
+        def on_checked(_x):
+            self.save_backup = backup_cb.isChecked()
         backup_cb.stateChanged.connect(on_checked)
         chan = self.lnworker.channels[channel_id]
         to_self_delay = chan.config[REMOTE].to_self_delay
@@ -161,7 +158,7 @@ class ChannelsList(MyTreeView):
         def task():
             coro = self.lnworker.force_close_channel(channel_id)
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, self.on_channel_closed, self.on_failure)
+        WaitingDialog(self, _('Please wait...'), task, self.on_channel_closed, self.on_failure)
 
     def remove_channel(self, channel_id):
         if self.main_window.question(_('Are you sure you want to delete this channel? This will purge associated transactions from your wallet history.')):
@@ -191,7 +188,9 @@ class ChannelsList(MyTreeView):
         def task():
             coro = self.lnworker.request_force_close(channel_id)
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, self.on_request_sent, self.on_failure)
+        def on_done(b):
+            self.main_window.show_message(_('Request scheduled'))
+        WaitingDialog(self, _('Please wait...'), task, on_done, self.on_failure)
 
     def set_frozen(self, chan, *, for_sending, value):
         if not self.lnworker.uses_trampoline() or self.lnworker.is_trampoline_peer(chan.node_id):
@@ -233,13 +232,13 @@ class ChannelsList(MyTreeView):
         menu.setSeparatorsCollapsible(True)  # consecutive separators are merged together
         selected = self.selected_in_column(self.Columns.NODE_ALIAS)
         if not selected:
-            menu.exec_(self.viewport().mapToGlobal(position))
+            menu.exec(self.viewport().mapToGlobal(position))
             return
         if len(selected) == 2:
             chan1, chan2 = self.get_rebalance_pair()
             if chan1 and chan2:
                 menu.addAction(_("Rebalance channels"), lambda: self.main_window.rebalance_dialog(chan1, chan2))
-                menu.exec_(self.viewport().mapToGlobal(position))
+                menu.exec(self.viewport().mapToGlobal(position))
             return
         elif len(selected) > 2:
             return
@@ -284,7 +283,7 @@ class ChannelsList(MyTreeView):
                 menu.addAction(_("Delete"), lambda: self.remove_channel_backup(channel_id))
             else:
                 menu.addAction(_("Delete"), lambda: self.remove_channel(channel_id))
-        menu.exec_(self.viewport().mapToGlobal(position))
+        menu.exec(self.viewport().mapToGlobal(position))
 
     @QtCore.pyqtSlot(Abstract_Wallet, AbstractChannel)
     def do_update_single_row(self, wallet: Abstract_Wallet, chan: AbstractChannel):
@@ -295,7 +294,7 @@ class ChannelsList(MyTreeView):
             if item.data(ROLE_CHANNEL_ID) != chan.channel_id:
                 continue
             for column, v in self.format_fields(chan).items():
-                self.model().item(row, column).setData(v, QtCore.Qt.DisplayRole)
+                self.model().item(row, column).setData(v, QtCore.Qt.ItemDataRole.DisplayRole)
             items = [self.model().item(row, column) for column in self.Columns]
             self._update_chan_frozen_bg(chan=chan, items=items)
         if wallet.lnworker:
@@ -332,7 +331,7 @@ class ChannelsList(MyTreeView):
             self.model().insertRow(0, items)
 
         # FIXME sorting by SHORT_CHANID should treat values as tuple, not as string ( 50x1x1 > 8x1x1 )
-        self.sortByColumn(self.Columns.SHORT_CHANID, Qt.DescendingOrder)
+        self.sortByColumn(self.Columns.SHORT_CHANID, Qt.SortOrder.DescendingOrder)
 
     def _update_chan_frozen_bg(self, *, chan: AbstractChannel, items: Sequence[QStandardItem]):
         assert self._default_item_bg_brush is not None
@@ -390,7 +389,7 @@ class ChannelsList(MyTreeView):
         h.addWidget(QLabel(capacity), 2, 1)
         vbox.addLayout(h)
         vbox.addLayout(Buttons(OkButton(d)))
-        d.exec_()
+        d.exec()
 
     def set_visibility_of_columns(self):
         def set_visible(col: int, b: bool):
@@ -439,6 +438,13 @@ class ChanFeatNoOnchainBackup(ChannelFeature):
         return read_QIcon("cloud_no")
 
 
+class ChanFeatAnchors(ChannelFeature):
+    def tooltip(self) -> str:
+        return _("This channel uses anchor outputs.")
+    def icon(self) -> QIcon:
+        return read_QIcon("anchor")
+
+
 class ChannelFeatureIcons:
 
     def __init__(self, features: Sequence['ChannelFeature']):
@@ -459,6 +465,8 @@ class ChannelFeatureIcons:
                 feats.append(ChanFeatTrampoline())
             if not chan.has_onchain_backup():
                 feats.append(ChanFeatNoOnchainBackup())
+            if chan.has_anchors():
+                feats.append(ChanFeatAnchors())
         return ChannelFeatureIcons(feats)
 
     def paint(self, painter: QPainter, rect: QRect) -> None:

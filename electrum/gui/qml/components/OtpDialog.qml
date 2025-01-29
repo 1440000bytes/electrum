@@ -11,7 +11,7 @@ ElDialog {
     id: dialog
 
     title: qsTr('Trustedcoin')
-    iconSource: '../../../icons/trustedcoin-status.png'
+    iconSource: Qt.resolvedUrl('../../../plugins/trustedcoin/trustedcoin-status.png')
 
     property string otpauth
 
@@ -52,6 +52,8 @@ ElDialog {
             Layout.topMargin: constants.paddingMedium
             Layout.bottomMargin: constants.paddingMedium
             Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
 
             text: _otpError
             color: constants.colorError

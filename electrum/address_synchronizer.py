@@ -31,7 +31,7 @@ from .crypto import sha256
 from . import bitcoin, util
 from .bitcoin import COINBASE_MATURITY
 from .util import profiler, bfh, TxMinedInfo, UnrelatedTransactionException, with_lock, OldTaskGroup
-from .transaction import Transaction, TxOutput, TxInput, PartialTxInput, TxOutpoint, PartialTransaction
+from .transaction import Transaction, TxOutput, TxInput, PartialTxInput, TxOutpoint, PartialTransaction, tx_from_any
 from .synchronizer import Synchronizer
 from .verifier import SPV
 from .blockchain import hash_header, Blockchain
@@ -110,8 +110,14 @@ class AddressSynchronizer(Logger, EventListener):
         self.remove_local_transactions_we_dont_have()
 
     def is_mine(self, address: Optional[str]) -> bool:
-        """Returns whether an address is in our set
-        Note: This class has a larget set of addresses than the wallet
+        """Returns whether an address is in our set.
+
+        Differences between adb.is_mine and wallet.is_mine:
+        - adb.is_mine: addrs that we are watching (e.g. via Synchronizer)
+            - lnwatcher adds its own lightning-related addresses that are not part of the wallet
+        - wallet.is_mine: addrs that are part of the wallet balance or the wallet might sign for
+            - an offline wallet might learn from a PSBT about addrs beyond its gap limit
+        Neither set is guaranteed to be a subset of the other.
         """
         if not address: return False
         return self.db.is_addr_in_history(address)
@@ -215,7 +221,7 @@ class AddressSynchronizer(Logger, EventListener):
             self.synchronizer.add(address)
         self.up_to_date_changed()
 
-    def get_conflicting_transactions(self, tx_hash, tx: Transaction, include_self=False):
+    def get_conflicting_transactions(self, tx: Transaction, *, include_self: bool = False) -> Set[str]:
         """Returns a set of transaction hashes from the wallet history that are
         directly conflicting with tx, i.e. they have common outpoints being
         spent with tx.
@@ -237,12 +243,13 @@ class AddressSynchronizer(Logger, EventListener):
                 # annoying assert that has revealed several bugs over time:
                 assert self.db.get_transaction(spending_tx_hash), "spending tx not in wallet db"
                 conflicting_txns |= {spending_tx_hash}
-            if tx_hash in conflicting_txns:
-                # this tx is already in history, so it conflicts with itself
-                if len(conflicting_txns) > 1:
-                    raise Exception('Found conflicting transactions already in wallet history.')
-                if not include_self:
-                    conflicting_txns -= {tx_hash}
+            if tx_hash := tx.txid():
+                if tx_hash in conflicting_txns:
+                    # this tx is already in history, so it conflicts with itself
+                    if len(conflicting_txns) > 1:
+                        raise Exception('Found conflicting transactions already in wallet history.')
+                    if not include_self:
+                        conflicting_txns -= {tx_hash}
             return conflicting_txns
 
     def get_transaction(self, txid: str) -> Optional[Transaction]:
@@ -268,6 +275,8 @@ class AddressSynchronizer(Logger, EventListener):
         tx_hash = tx.txid()
         if tx_hash is None:
             raise Exception("cannot add tx without txid to wallet history")
+        # For sanity, try to serialize and deserialize tx early:
+        tx_from_any(str(tx))  # see if raises (no-side-effects)
         # we need self.transaction_lock but get_tx_height will take self.lock
         # so we need to take that too here, to enforce order of locks
         with self.lock, self.transaction_lock:
@@ -292,7 +301,7 @@ class AddressSynchronizer(Logger, EventListener):
             # When this method exits, there must NOT be any conflict, so
             # either keep this txn and remove all conflicting (along with dependencies)
             #     or drop this txn
-            conflicting_txns = self.get_conflicting_transactions(tx_hash, tx)
+            conflicting_txns = self.get_conflicting_transactions(tx)
             if conflicting_txns:
                 existing_mempool_txn = any(
                     self.get_tx_height(tx_hash2).height in (TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT)
@@ -334,7 +343,7 @@ class AddressSynchronizer(Logger, EventListener):
             for n, txo in enumerate(tx.outputs()):
                 v = txo.value
                 ser = tx_hash + ':%d'%n
-                scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey.hex())
+                scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey)
                 self.db.add_prevout_by_scripthash(scripthash, prevout=TxOutpoint.from_str(ser), value=v)
                 addr = txo.address
                 if addr and self.is_mine(addr):
@@ -400,7 +409,7 @@ class AddressSynchronizer(Logger, EventListener):
             self.unconfirmed_tx.pop(tx_hash, None)
             if tx:
                 for idx, txo in enumerate(tx.outputs()):
-                    scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey.hex())
+                    scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey)
                     prevout = TxOutpoint(bfh(tx_hash), idx)
                     self.db.remove_prevout_by_scripthash(scripthash, prevout=prevout, value=txo.value)
         util.trigger_callback('adb_removed_tx', self, tx_hash, tx)
@@ -751,6 +760,7 @@ class AddressSynchronizer(Logger, EventListener):
               incorrectly early-exit and return None, e.g. for not-all-ismine-input txs,
               where we could calculate the fee if we deserialized (but to see if we have all
               the parent txs available, we would have to deserialize first).
+              More expensive but more complete alternative: wallet.get_tx_info(tx).fee
         """
         # check if stored fee is available
         fee = self.db.get_tx_fee(txid, trust_server=False)
@@ -852,6 +862,7 @@ class AddressSynchronizer(Logger, EventListener):
                     excluded_coins: Set[str] = None) -> Tuple[int, int, int]:
         """Return the balance of a set of addresses:
         confirmed and matured, unconfirmed, unmatured
+        Note: intended for display-purposes. would need extreme care for "has enough funds" checks (see #8835)
         """
         if excluded_addresses is None:
             excluded_addresses = set()

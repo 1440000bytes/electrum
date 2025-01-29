@@ -24,7 +24,8 @@ from .logging import get_logger, Logger
 FEE_ETA_TARGETS = [25, 10, 5, 2]
 FEE_DEPTH_TARGETS = [10_000_000, 5_000_000, 2_000_000, 1_000_000,
                      800_000, 600_000, 400_000, 250_000, 100_000]
-FEE_LN_ETA_TARGET = 2  # note: make sure the network is asking for estimates for this target
+FEE_LN_ETA_TARGET = 2       # note: make sure the network is asking for estimates for this target
+FEE_LN_LOW_ETA_TARGET = 25  # note: make sure the network is asking for estimates for this target
 
 # satoshi per kbyte
 FEERATE_MAX_DYNAMIC = 1500000
@@ -62,12 +63,14 @@ class ConfigVar(property):
         *,
         default: Union[Any, Callable[['SimpleConfig'], Any]],  # typically a literal, but can also be a callable
         type_=None,
+        convert_getter: Callable[[Any], Any] = None,
         short_desc: Callable[[], str] = None,
         long_desc: Callable[[], str] = None,
     ):
         self._key = key
         self._default = default
         self._type = type_
+        self._convert_getter = convert_getter
         # note: the descriptions are callables instead of str literals, to delay evaluating the _() translations
         #       until after the language is set.
         assert short_desc is None or callable(short_desc)
@@ -82,6 +85,10 @@ class ConfigVar(property):
         with config.lock:
             if config.is_set(self._key):
                 value = config.get(self._key)
+                # run converter
+                if self._convert_getter is not None:
+                    value = self._convert_getter(value)
+                # type-check
                 if self._type is not None:
                     assert value is not None, f"got None for key={self._key!r}"
                     try:
@@ -235,16 +242,20 @@ class SimpleConfig(Logger):
         self.amt_precision_post_satoshi = self.BTC_AMOUNTS_PREC_POST_SAT
         self.amt_add_thousands_sep = self.BTC_AMOUNTS_ADD_THOUSANDS_SEP
 
-    def electrum_path(self):
+    def electrum_path_root(self):
         # Read electrum_path from command line
         # Otherwise use the user's default data directory.
-        path = self.get('electrum_path')
-        if path is None:
-            path = self.user_dir()
-
+        path = self.get('electrum_path') or self.user_dir()
         make_dir(path, allow_symlink=False)
+        return path
+
+    def electrum_path(self):
+        path = self.electrum_path_root()
         if self.get('testnet'):
             path = os.path.join(path, 'testnet')
+            make_dir(path, allow_symlink=False)
+        elif self.get('testnet4'):
+            path = os.path.join(path, 'testnet4')
             make_dir(path, allow_symlink=False)
         elif self.get('regtest'):
             path = os.path.join(path, 'regtest')
@@ -414,8 +425,8 @@ class SimpleConfig(Logger):
         s = json.dumps(self.user_config, indent=4, sort_keys=True)
         try:
             with open(path, "w", encoding='utf-8') as f:
+                os_chmod(path, stat.S_IREAD | stat.S_IWRITE)  # set restrictive perms *before* we write data
                 f.write(s)
-            os_chmod(path, stat.S_IREAD | stat.S_IWRITE)
         except OSError:
             # datadir probably deleted while running... e.g. portable exe running on ejected USB drive
             # (in which case it is typically either FileNotFoundError or PermissionError,
@@ -445,6 +456,7 @@ class SimpleConfig(Logger):
 
         new_path = self.get_fallback_wallet_path()
 
+        # TODO: this can be removed by now
         # default path in pre 1.9 versions
         old_path = os.path.join(self.path, "electrum.dat")
         if os.path.exists(old_path) and not os.path.exists(new_path):
@@ -452,18 +464,14 @@ class SimpleConfig(Logger):
 
         return new_path
 
-    def get_fallback_wallet_path(self):
+    def get_datadir_wallet_path(self):
         util.assert_datadir_available(self.path)
         dirpath = os.path.join(self.path, "wallets")
         make_dir(dirpath, allow_symlink=False)
-        path = os.path.join(self.path, "wallets", "default_wallet")
-        return path
+        return dirpath
 
-    def remove_from_recently_open(self, filename):
-        recent = self.RECENTLY_OPEN_WALLET_FILES or []
-        if filename in recent:
-            recent.remove(filename)
-            self.RECENTLY_OPEN_WALLET_FILES = recent
+    def get_fallback_wallet_path(self):
+        return os.path.join(self.get_datadir_wallet_path(), "default_wallet")
 
     def set_session_timeout(self, seconds):
         self.logger.info(f"session timeout -> {seconds} seconds")
@@ -586,7 +594,7 @@ class SimpleConfig(Logger):
     def get_depth_mb_str(self, depth: int) -> str:
         # e.g. 500_000 -> "0.50 MB"
         depth_mb = "{:.2f}".format(depth / 1_000_000)  # maybe .rstrip("0") ?
-        return f"{depth_mb} MB"
+        return f"{depth_mb} {util.UI_UNIT_NAME_MEMPOOL_MB}"
 
     def depth_tooltip(self, depth: Optional[int]) -> str:
         """Returns text tooltip for given mempool depth (in vbytes)."""
@@ -633,7 +641,7 @@ class SimpleConfig(Logger):
             fee_per_byte = None
         else:
             fee_per_byte = fee_per_kb/1000
-            rate_str = format_fee_satoshis(fee_per_byte) + ' sat/byte'
+            rate_str = format_fee_satoshis(fee_per_byte) + f" {util.UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE}"
 
         if dyn:
             if mempool:
@@ -869,8 +877,9 @@ class SimpleConfig(Logger):
     def format_amount_and_units(self, *args, **kwargs) -> str:
         return self.format_amount(*args, **kwargs) + ' ' + self.get_base_unit()
 
-    def format_fee_rate(self, fee_rate):
-        return format_fee_satoshis(fee_rate/1000, num_zeros=self.num_zeros) + ' sat/byte'
+    def format_fee_rate(self, fee_rate) -> str:
+        """fee_rate is in sat/kvByte."""
+        return format_fee_satoshis(fee_rate/1000, num_zeros=self.num_zeros) + f" {util.UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE}"
 
     def get_base_unit(self):
         return decimal_point_to_base_unit_name(self.decimal_point)
@@ -913,19 +922,12 @@ class SimpleConfig(Logger):
                     f"Either use config.cv.{name}.set() or assign to config.{name} instead.")
         return CVLookupHelper()
 
-    def _default_swapserver_url(self) -> str:
-        if constants.net == constants.BitcoinMainnet:
-            default = 'https://swaps.electrum.org/api'
-        elif constants.net == constants.BitcoinTestnet:
-            default = 'https://swaps.electrum.org/testnet'
-        else:
-            default = 'http://localhost:5455'
-        return default
-
     # config variables ----->
     NETWORK_AUTO_CONNECT = ConfigVar('auto_connect', default=True, type_=bool)
     NETWORK_ONESERVER = ConfigVar('oneserver', default=False, type_=bool)
-    NETWORK_PROXY = ConfigVar('proxy', default=None)
+    NETWORK_PROXY = ConfigVar('proxy', default=None, type_=str, convert_getter=lambda v: "none" if v is None else v)
+    NETWORK_PROXY_USER = ConfigVar('proxy_user', default=None, type_=str)
+    NETWORK_PROXY_PASSWORD = ConfigVar('proxy_password', default=None, type_=str)
     NETWORK_SERVER = ConfigVar('server', default=None, type_=str)
     NETWORK_NOONION = ConfigVar('noonion', default=False, type_=bool)
     NETWORK_OFFLINE = ConfigVar('offline', default=False, type_=bool)
@@ -933,6 +935,7 @@ class SimpleConfig(Logger):
     NETWORK_SERVERFINGERPRINT = ConfigVar('serverfingerprint', default=None, type_=str)
     NETWORK_MAX_INCOMING_MSG_SIZE = ConfigVar('network_max_incoming_msg_size', default=1_000_000, type_=int)  # in bytes
     NETWORK_TIMEOUT = ConfigVar('network_timeout', default=None, type_=int)
+    NETWORK_BOOKMARKED_SERVERS = ConfigVar('network_bookmarked_servers', default=None)
 
     WALLET_BATCH_RBF = ConfigVar(
         'batch_rbf', default=False, type_=bool,
@@ -1014,13 +1017,6 @@ Note that static backups only allow you to request a force-close with the remote
 
 If this is enabled, other nodes cannot open a channel to you. Channel recovery data is encrypted, so that only your wallet can decrypt it. However, blockchain analysis will be able to tell that the transaction was probably created by Electrum."""),
     )
-    LIGHTNING_ALLOW_INSTANT_SWAPS = ConfigVar(
-        'allow_instant_swaps', default=False, type_=bool,
-        short_desc=lambda: _("Allow instant swaps"),
-        long_desc=lambda: _("""If this option is checked, your client will complete reverse swaps before the funding transaction is confirmed.
-
-Note you are at risk of losing the funds in the swap, if the funding transaction never confirms."""),
-    )
     LIGHTNING_TO_SELF_DELAY_CSV = ConfigVar('lightning_to_self_delay', default=7 * 144, type_=int)
     LIGHTNING_MAX_FUNDING_SAT = ConfigVar('lightning_max_funding_sat', default=LN_MAX_FUNDING_SAT_LEGACY, type_=int)
     LIGHTNING_LEGACY_ADD_TRAMPOLINE = ConfigVar(
@@ -1031,6 +1027,19 @@ Note you are at risk of losing the funds in the swap, if the funding transaction
 This will result in longer routes; it might increase your fees and decrease the success rate of your payments."""),
     )
     INITIAL_TRAMPOLINE_FEE_LEVEL = ConfigVar('initial_trampoline_fee_level', default=1, type_=int)
+    LIGHTNING_PAYMENT_FEE_MAX_MILLIONTHS = ConfigVar(
+        'lightning_payment_fee_max_millionths', default=10_000,  # 1%
+        type_=int,
+        short_desc=lambda: _("Max lightning fees to pay"),
+        long_desc=lambda: _("""When sending lightning payments, this value is an upper bound for the fees we allow paying, proportional to the payment amount. The fees are paid in addition to the payment amount, by the sender.
+
+Warning: setting this to too low will result in lots of payment failures."""),
+    )
+    LIGHTNING_PAYMENT_FEE_CUTOFF_MSAT = ConfigVar(
+        'lightning_payment_fee_cutoff_msat', default=10_000,  # 10 sat
+        type_=int,
+        short_desc=lambda: _("Max lightning fees to pay for small payments"),
+    )
 
     LIGHTNING_NODE_ALIAS = ConfigVar('lightning_node_alias', default='', type_=str)
     EXPERIMENTAL_LN_FORWARD_PAYMENTS = ConfigVar('lightning_forward_payments', default=False, type_=bool)
@@ -1075,6 +1084,14 @@ This will result in longer routes; it might increase your fees and decrease the 
             'Download parent transactions from the network.\n'
             'Allows filling in missing fee and input details.'),
     )
+    GUI_QT_TX_DIALOG_EXPORT_STRIP_SENSITIVE_METADATA = ConfigVar(
+        'gui_qt_tx_dialog_export_strip_sensitive_metadata', default=False, type_=bool,
+        short_desc=lambda: _('For CoinJoin; strip privates'),
+    )
+    GUI_QT_TX_DIALOG_EXPORT_INCLUDE_GLOBAL_XPUBS = ConfigVar(
+        'gui_qt_tx_dialog_export_include_global_xpubs', default=False, type_=bool,
+        short_desc=lambda: _('For hardware device; include xpubs'),
+    )
     GUI_QT_RECEIVE_TABS_INDEX = ConfigVar('receive_tabs_index', default=0, type_=int)
     GUI_QT_RECEIVE_TAB_QR_VISIBLE = ConfigVar('receive_qr_visible', default=False, type_=bool)
     GUI_QT_TX_EDITOR_SHOW_IO = ConfigVar(
@@ -1094,11 +1111,13 @@ This will result in longer routes; it might increase your fees and decrease the 
     GUI_QT_SHOW_TAB_UTXO = ConfigVar('show_utxo_tab', default=False, type_=bool)
     GUI_QT_SHOW_TAB_CONTACTS = ConfigVar('show_contacts_tab', default=False, type_=bool)
     GUI_QT_SHOW_TAB_CONSOLE = ConfigVar('show_console_tab', default=False, type_=bool)
+    GUI_QT_SHOW_TAB_NOTES = ConfigVar('show_notes_tab', default=False, type_=bool)
 
     GUI_QML_PREFERRED_REQUEST_TYPE = ConfigVar('preferred_request_type', default='bolt11', type_=str)
     GUI_QML_USER_KNOWS_PRESS_AND_HOLD = ConfigVar('user_knows_press_and_hold', default=False, type_=bool)
     GUI_QML_ADDRESS_LIST_SHOW_TYPE = ConfigVar('address_list_show_type', default=1, type_=int)
     GUI_QML_ADDRESS_LIST_SHOW_USED = ConfigVar('address_list_show_used', default=False, type_=bool)
+    GUI_QML_ALWAYS_ALLOW_SCREENSHOTS = ConfigVar('android_always_allow_screenshots', default=False, type_=bool)
 
     BTC_AMOUNTS_DECIMAL_POINT = ConfigVar('decimal_point', default=DECIMAL_POINT_DEFAULT, type_=int)
     BTC_AMOUNTS_FORCE_NZEROS_AFTER_DECIMAL_POINT = ConfigVar(
@@ -1165,11 +1184,28 @@ This will result in longer routes; it might increase your fees and decrease the 
     WIZARD_DONT_CREATE_SEGWIT = ConfigVar('nosegwit', default=False, type_=bool)
     CONFIG_FORGET_CHANGES = ConfigVar('forget_config', default=False, type_=bool)
 
-    # submarine swap server
-    SWAPSERVER_URL = ConfigVar('swapserver_url', default=_default_swapserver_url, type_=str)
-    SWAPSERVER_PORT = ConfigVar('swapserver_port', default=5455, type_=int)
+    # connect to remote submarine swap server
+    SWAPSERVER_URL = ConfigVar('swapserver_url', default='', type_=str)
+    # run submarine swap server locally
+    SWAPSERVER_PORT = ConfigVar('swapserver_port', default=None, type_=int)
+    SWAPSERVER_FEE_MILLIONTHS = ConfigVar('swapserver_fee_millionths', default=5000, type_=int)
     TEST_SWAPSERVER_REFUND = ConfigVar('test_swapserver_refund', default=False, type_=bool)
+    SWAPSERVER_NPUB = ConfigVar('swapserver_npub', default=None, type_=str)
 
+    # nostr
+    NOSTR_RELAYS = ConfigVar(
+        'nostr_relays',
+        default='wss://nos.lol,wss://relay.damus.io,wss://brb.io,wss://nostr.mom',
+        type_=str,
+        short_desc=lambda: _("Nostr relays"),
+        long_desc=lambda: ' '.join([
+            _('Nostr relays are used to send and receive submarine swap offers'),
+            _('If this list is empty, Electrum will use http instead'),
+        ]),
+    )
+
+    # anchor outputs channels
+    ENABLE_ANCHOR_CHANNELS = ConfigVar('enable_anchor_channels', default=False, type_=bool)
     # zeroconf channels
     ACCEPT_ZEROCONF_CHANNELS = ConfigVar('accept_zeroconf_channels', default=False, type_=bool)
     ZEROCONF_TRUSTED_NODE = ConfigVar('zeroconf_trusted_node', default='', type_=str)

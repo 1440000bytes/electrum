@@ -5,11 +5,13 @@ import QtQuick.Controls.Material
 Pane {
     id: root
     signal next
+    signal finish
     signal prev
     signal accept
     property var wizard_data : ({})
     property bool valid
     property bool last: false
+    property string wizard_title: ''
     property string title: ''
     property bool securePage: false
 

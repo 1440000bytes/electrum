@@ -1,7 +1,8 @@
 import time
 from struct import pack
 
-from electrum import ecc
+import electrum_ecc as ecc
+
 from electrum.i18n import _
 from electrum.util import UserCancelled, UserFacingException
 from electrum.keystore import bip39_normalize_passphrase
@@ -12,9 +13,17 @@ from electrum.plugins.hw_wallet.plugin import OutdatedHwFirmwareException, Hardw
 
 from trezorlib.client import TrezorClient, PASSPHRASE_ON_DEVICE
 from trezorlib.exceptions import TrezorFailure, Cancelled, OutdatedFirmwareError
-from trezorlib.messages import WordRequestType, FailureType, RecoveryDeviceType, ButtonRequestType
+from trezorlib.messages import WordRequestType, FailureType, ButtonRequestType
 import trezorlib.btc
 import trezorlib.device
+
+try:
+    # trezor >= 0.13.9
+    from trezorlib.messages import RecoveryDeviceInputMethod
+except ImportError:
+    # Backward compatibility for trezor < 0.13.9
+    from trezorlib.messages import RecoveryDeviceType as RecoveryDeviceInputMethod
+
 
 MESSAGES = {
     ButtonRequestType.ConfirmOutput:
@@ -203,7 +212,7 @@ class TrezorClientBase(HardwareClientBase, Logger):
         return self.client.version >= self.plugin.minimum_firmware
 
     def get_trezor_model(self):
-        """Returns '1' for Trezor One, 'T' for Trezor T."""
+        """Returns '1' for Trezor One, 'T' for Trezor T, etc."""
         return self.features.model
 
     def device_model_name(self):
@@ -212,6 +221,8 @@ class TrezorClientBase(HardwareClientBase, Logger):
             return "Trezor One"
         elif model == 'T':
             return "Trezor T"
+        elif model == "Safe 3":
+            return "Trezor Safe 3"
         return None
 
     @runs_in_hwd_thread
@@ -259,6 +270,16 @@ class TrezorClientBase(HardwareClientBase, Logger):
             return trezorlib.btc.sign_tx(self.client, *args, **kwargs)
 
     @runs_in_hwd_thread
+    def get_ownership_id(self, *args, **kwargs):
+        with self.run_flow():
+            return trezorlib.btc.get_ownership_id(self.client, *args, **kwargs)
+
+    @runs_in_hwd_thread
+    def get_ownership_proof(self, *args, **kwargs):
+        with self.run_flow():
+            return trezorlib.btc.get_ownership_proof(self.client, *args, **kwargs)
+
+    @runs_in_hwd_thread
     def reset_device(self, *args, **kwargs):
         with self.run_flow():
             return trezorlib.device.reset(self.client, *args, **kwargs)
@@ -290,10 +311,12 @@ class TrezorClientBase(HardwareClientBase, Logger):
         # check PIN length. Depends on model and firmware version
         # https://github.com/trezor/trezor-firmware/issues/1167
         limit = 9
-        if self.features.model == "1" and (1, 10, 0) <= self.client.version:
-            limit = 50
-        elif self.features.model == "T" and (2, 4, 0) <= self.client.version:
-            limit = 50
+        if self.get_trezor_model() == "1":
+            if (1, 10, 0) <= self.client.version:
+                limit = 50
+        else:
+            if (2, 4, 0) <= self.client.version:
+                limit = 50
         if len(pin) > limit:
             self.handler.show_error(_('The PIN cannot be longer than {} characters.').format(limit))
             raise Cancelled
@@ -332,7 +355,7 @@ class TrezorClientBase(HardwareClientBase, Logger):
         if recovery_type is None:
             return None
 
-        if recovery_type == RecoveryDeviceType.Matrix:
+        if recovery_type == RecoveryDeviceInputMethod.Matrix:
             return self._matrix_char
 
         step = 0

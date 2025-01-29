@@ -361,6 +361,14 @@ ApplicationWindow
         }
     }
 
+    property alias helpDialog: _helpDialog
+    Component {
+        id: _helpDialog
+        HelpDialog {
+            onClosed: destroy()
+        }
+    }
+
     property alias passwordDialog: _passwordDialog
     Component {
         id: _passwordDialog
@@ -405,7 +413,7 @@ ApplicationWindow
     Component {
         id: _scanDialog
         QRScanner {
-            //onClosed: destroy()
+            onFinished: destroy()
         }
     }
     Component {
@@ -441,6 +449,7 @@ ApplicationWindow
                 onError: (message) => {
                     var dialog = app.messageDialog.createObject(app, {
                         title: qsTr('Error'),
+                        iconSource: Qt.resolvedUrl('../../icons/warning.png'),
                         text: message
                     })
                     dialog.open()
@@ -475,6 +484,7 @@ ApplicationWindow
             // without completed serverConnectWizard we can't start
             dialog.rejected.connect(function() {
                 app.visible = false
+                AppController.wantClose = true
                 Qt.callLater(Qt.quit)
             })
             dialog.accepted.connect(function() {
@@ -559,7 +569,11 @@ ApplicationWindow
         }
         function onWalletOpenError(error) {
             console.log('wallet open error')
-            var dialog = app.messageDialog.createObject(app, { title: qsTr('Error'), 'text': error })
+            var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: error
+            })
             dialog.open()
         }
         function onAuthRequired(method, authMessage) {
@@ -615,6 +629,17 @@ ApplicationWindow
 
     function handleAuthRequired(qtobject, method, authMessage) {
         console.log('auth using method ' + method)
+
+        if (method == 'wallet_else_pin') {
+            // if there is a loaded wallet and all wallets use the same password, use that
+            // else delegate to pin auth
+            if (Daemon.currentWallet && Daemon.singlePasswordEnabled) {
+                method = 'wallet'
+            } else {
+                method = 'pin'
+            }
+        }
+
         if (method == 'wallet') {
             if (Daemon.currentWallet.verifyPassword('')) {
                 // wallet has no password
@@ -663,7 +688,10 @@ ApplicationWindow
             qtobject.authProceed()
             return
         }
-        var dialog = app.messageDialog.createObject(app, {title: authMessage, yesno: true})
+        var dialog = app.messageDialog.createObject(app, {
+            title: authMessage,
+            yesno: true
+        })
         dialog.accepted.connect(function() {
             qtobject.authProceed()
         })

@@ -1,16 +1,16 @@
 import copy
 import threading
 from abc import abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QSize
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import (QDialog, QPushButton, QWidget, QLabel, QVBoxLayout, QScrollArea,
-                             QHBoxLayout, QLayout, QStackedWidget)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QSize, QMetaObject
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (QDialog, QPushButton, QWidget, QLabel, QVBoxLayout, QScrollArea,
+                             QHBoxLayout, QLayout)
 
 from electrum.i18n import _
 from electrum.logging import get_logger
-from electrum.gui.qt.util import Buttons, icon_path, MessageBoxMixin, WWLabel
+from electrum.gui.qt.util import Buttons, icon_path, MessageBoxMixin, WWLabel, ResizableStackedWidget, AbstractQWidget
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -39,14 +39,21 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         self.setMinimumSize(600, 400)
 
         self.title = QLabel()
+        self.window_title = ''
+        self.finish_label = _('Finish')
 
-        self.main_widget = QStackedWidget(self)
+        self.main_widget = ResizableStackedWidget(self)
 
         self.back_button = QPushButton(_("Back"), self)
         self.back_button.clicked.connect(self.on_back_button_clicked)
+        self.back_button.setEnabled(False)
+        self.back_button.setDefault(False)
+        self.back_button.setAutoDefault(False)
         self.next_button = QPushButton(_("Next"), self)
         self.next_button.clicked.connect(self.on_next_button_clicked)
+        self.next_button.setEnabled(False)
         self.next_button.setDefault(True)
+        self.next_button.setAutoDefault(True)
         self.requestPrev.connect(self.on_back_button_clicked)
         self.requestNext.connect(self.on_next_button_clicked)
         self.logo = QLabel()
@@ -54,7 +61,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         please_wait_layout = QVBoxLayout()
         please_wait_layout.addStretch(1)
         self.please_wait_l = QLabel(_("Please wait..."))
-        self.please_wait_l.setAlignment(Qt.AlignCenter)
+        self.please_wait_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         please_wait_layout.addWidget(self.please_wait_l)
         please_wait_layout.addStretch(1)
         self.please_wait = QWidget()
@@ -63,11 +70,12 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
 
         error_layout = QVBoxLayout()
         error_layout.addStretch(1)
-        # error_l = QLabel(_("Error!"))
-        # error_l.setAlignment(Qt.AlignCenter)
-        # error_layout.addWidget(error_l)
+        error_icon = QLabel()
+        error_icon.setPixmap(QPixmap(icon_path('warning.png')).scaledToWidth(48, mode=Qt.TransformationMode.SmoothTransformation))
+        error_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        error_layout.addWidget(error_icon)
         self.error_msg = WWLabel()
-        self.error_msg.setAlignment(Qt.AlignCenter)
+        self.error_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         error_layout.addWidget(self.error_msg)
         error_layout.addStretch(1)
         self.error = QWidget()
@@ -84,9 +92,9 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         scroll_widget = QWidget()
         scroll_widget.setLayout(inner_vbox)
         scroll = QScrollArea()
-        scroll.setFocusPolicy(Qt.NoFocus)
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidget(scroll_widget)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidgetResizable(True)
         icon_vbox = QVBoxLayout()
         icon_vbox.addWidget(self.logo)
@@ -99,6 +107,8 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         outer_vbox.addLayout(hbox)
         outer_vbox.addLayout(Buttons(self.back_button, self.next_button))
 
+        self.setTabOrder(self.back_button, self.next_button)
+
         self.icon_filename = None
         self.set_icon('electrum.png')
 
@@ -107,25 +117,27 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         self.show()
         self.raise_()
 
-        QTimer.singleShot(40, self.strt)
-
-        # TODO: re-test if needed on macOS
-        # self.refresh_gui()  # Need for QT on MacOSX.  Lame.
-
-    # def refresh_gui(self):
-    #     # For some reason, to refresh the GUI this needs to be called twice
-    #     self.app.processEvents()
-    #     self.app.processEvents()
+        QMetaObject.invokeMethod(self, 'strt', Qt.ConnectionType.QueuedConnection)  # call strt after subclass constructor(s)
 
     def sizeHint(self) -> QSize:
         return QSize(600, 400)
 
+    @pyqtSlot()
     def strt(self):
         if self.start_viewstate is not None:
             viewstate = self._current = self.start_viewstate
         else:
             viewstate = self.start_wizard()
-        self.load_next_component(viewstate.view, viewstate.wizard_data)
+        self.load_next_component(viewstate.view, viewstate.wizard_data, viewstate.params)
+        self.set_default_focus()
+
+        # TODO: re-test if needed on macOS
+        self.refresh_gui()  # Need for QT on MacOSX.  Lame.
+
+    def refresh_gui(self):
+        # For some reason, to refresh the GUI this needs to be called twice
+        self.app.processEvents()
+        self.app.processEvents()
 
     def load_next_component(self, view, wdata=None, params=None):
         if wdata is None:
@@ -135,19 +147,20 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
 
         comp = self.view_to_component(view)
         try:
+            self._logger.debug(f'load_next_component: {comp!r}')
             page = comp(self.main_widget, self)
         except Exception as e:
             self._logger.error(f'not a class: {comp!r}')
             raise e
         page.wizard_data = copy.deepcopy(wdata)
         page.params = params
+        page.on_ready()  # call before component emits any signals
+
         page.updated.connect(self.on_page_updated)
-        self._logger.debug(f'{page!r}')
 
         # add to stack and update wizard
-        self.main_widget.setCurrentIndex(self.main_widget.addWidget(page))
-        page.on_ready()
         page.apply()
+        self.main_widget.setCurrentIndex(self.main_widget.addWidget(page))
         self.update()
 
     @pyqtSlot(object)
@@ -159,18 +172,27 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
     def set_icon(self, filename):
         prior_filename, self.icon_filename = self.icon_filename, filename
         self.logo.setPixmap(QPixmap(icon_path(filename))
-                            .scaledToWidth(60, mode=Qt.SmoothTransformation))
+                            .scaledToWidth(60, mode=Qt.TransformationMode.SmoothTransformation))
         return prior_filename
+
+    def set_default_focus(self):
+        page = self.main_widget.currentWidget()
+        control = page.initialFocus()
+        if control and control.isVisible() and control.isEnabled():
+            control.setFocus()
+        else:
+            self.next_button.setFocus()
 
     def can_go_back(self) -> bool:
         return len(self._stack) > 0
 
     def update(self):
         page = self.main_widget.currentWidget()
+        self.setWindowTitle(page.wizard_title if page.wizard_title else self.window_title)
         self.title.setText(f'<b>{page.title}</b>' if page.title else '')
         self.back_button.setText(_('Back') if self.can_go_back() else _('Cancel'))
         self.back_button.setEnabled(not page.busy)
-        self.next_button.setText(_('Next') if not self.is_last(page.wizard_data) else _('Finish'))
+        self.next_button.setText(_('Next') if not self.is_last(page.wizard_data) else self.finish_label)
         self.next_button.setEnabled(not page.busy and page.valid)
         self.main_widget.setVisible(not page.busy and not bool(page.error))
         self.please_wait.setVisible(page.busy)
@@ -178,8 +200,12 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         self.error_msg.setText(str(page.error))
         self.error.setVisible(not page.busy and bool(page.error))
         icon = page.params.get('icon', icon_path('electrum.png'))
-        if icon != self.icon_filename:
-            self.set_icon(icon)
+        if icon:
+            if icon != self.icon_filename:
+                self.set_icon(icon)
+            self.logo.setVisible(True)
+        else:
+            self.logo.setVisible(False)
 
     def on_back_button_clicked(self):
         if self.can_go_back():
@@ -202,8 +228,13 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
             else:
                 self.prev()  # rollback the submit above
         else:
-            next = self.submit(wd)
-            self.load_next_component(next.view, next.wizard_data, next.params)
+            view = self.submit(wd)
+            try:
+                self.load_next_component(view.view, view.wizard_data, view.params)
+                self.set_default_focus()
+            except Exception as e:
+                self.prev()  # rollback the submit above
+                raise e
 
     def start_wizard(self) -> 'WizardViewState':
         self.start()
@@ -212,7 +243,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
     def view_to_component(self, view) -> QWidget:
         return self.navmap[view]['gui']
 
-    def submit(self, wizard_data) -> dict:
+    def submit(self, wizard_data) -> 'WizardViewState':
         wdata = wizard_data.copy()
         view = self.resolve_next(self._current.view, wdata)
         return view
@@ -230,7 +261,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         return True
 
 
-class WizardComponent(QWidget):
+class WizardComponent(AbstractQWidget):
     updated = pyqtSignal(object)
 
     def __init__(self, parent: QWidget, wizard: QEAbstractWizard, *, title: str = None, layout: QLayout = None):
@@ -238,6 +269,7 @@ class WizardComponent(QWidget):
         self.setLayout(layout if layout else QVBoxLayout(self))
         self.wizard_data = {}
         self.title = title if title is not None else 'No title'
+        self.wizard_title = None
         self.busy_msg = ''
         self.wizard = wizard
         self._error = ''
@@ -289,3 +321,7 @@ class WizardComponent(QWidget):
             self.updated.emit(self)
         except RuntimeError:
             pass
+
+    def initialFocus(self) -> Optional[QWidget]:
+        """Override to specify a control that should receive initial focus"""
+        return None

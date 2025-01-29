@@ -4,19 +4,19 @@ import urllib
 import re
 from decimal import Decimal, InvalidOperation
 from enum import IntEnum
-from typing import NamedTuple, Optional, Callable, List, TYPE_CHECKING, Tuple
+from typing import NamedTuple, Optional, Callable, List, TYPE_CHECKING, Tuple, Union
 
 from . import bitcoin
 from .contacts import AliasNotFoundException
 from .i18n import _
 from .invoices import Invoice
 from .logging import Logger
-from .util import parse_max_spend, format_satoshis_plain, InvoiceError
+from .util import parse_max_spend, InvoiceError
 from .util import get_asyncio_loop, log_exceptions
 from .transaction import PartialTxOutput
 from .lnurl import decode_lnurl, request_lnurl, callback_lnurl, LNURLError, lightning_address_to_url
-from .bitcoin import COIN, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC, opcodes, construct_script
-from .lnaddr import lndecode, LnDecodeException, LnInvoiceException
+from .bitcoin import opcodes, construct_script
+from .lnaddr import LnInvoiceException
 from .lnutil import IncompatibleOrInsaneFeatures
 from .bip21 import parse_bip21_URI, InvalidBitcoinURI, LIGHTNING_URI_SCHEME, BITCOIN_BIP21_URI_SCHEME
 from . import paymentrequest
@@ -52,21 +52,21 @@ RE_SCRIPT_FN = r'script\((.*)\)'
 
 
 class PaymentIdentifierState(IntEnum):
-    EMPTY           = 0  # Initial state.
-    INVALID         = 1  # Unrecognized PI
-    AVAILABLE       = 2  # PI contains a payable destination
-                         # payable means there's enough addressing information to submit to one
-                         # of the channels Electrum supports (on-chain, lightning)
-    NEED_RESOLVE    = 3  # PI contains a recognized destination format, but needs an online resolve step
-    LNURLP_FINALIZE = 4  # PI contains a resolved LNURLp, but needs amount and comment to resolve to a bolt11
-    MERCHANT_NOTIFY = 5  # PI contains a valid payment request and on-chain destination. It should notify
-                         # the merchant payment processor of the tx after on-chain broadcast,
-                         # and supply a refund address (bip70)
-    MERCHANT_ACK    = 6  # PI notified merchant. nothing to be done.
-    ERROR           = 50 # generic error
-    NOT_FOUND       = 51 # PI contains a recognized destination format, but resolve step was unsuccesful
-    MERCHANT_ERROR  = 52 # PI failed notifying the merchant after broadcasting onchain TX
-    INVALID_AMOUNT  = 53 # Specified amount not accepted
+    EMPTY = 0               # Initial state.
+    INVALID = 1             # Unrecognized PI
+    AVAILABLE = 2           # PI contains a payable destination
+                            # payable means there's enough addressing information to submit to one
+                            # of the channels Electrum supports (on-chain, lightning)
+    NEED_RESOLVE = 3        # PI contains a recognized destination format, but needs an online resolve step
+    LNURLP_FINALIZE = 4     # PI contains a resolved LNURLp, but needs amount and comment to resolve to a bolt11
+    MERCHANT_NOTIFY = 5     # PI contains a valid payment request and on-chain destination. It should notify
+                            # the merchant payment processor of the tx after on-chain broadcast,
+                            # and supply a refund address (bip70)
+    MERCHANT_ACK = 6        # PI notified merchant. nothing to be done.
+    ERROR = 50              # generic error
+    NOT_FOUND = 51          # PI contains a recognized destination format, but resolve step was unsuccessful
+    MERCHANT_ERROR = 52     # PI failed notifying the merchant after broadcasting onchain TX
+    INVALID_AMOUNT = 53     # Specified amount not accepted
 
 
 class PaymentIdentifierType(IntEnum):
@@ -266,6 +266,10 @@ class PaymentIdentifier(Logger):
                             self.bolt11.outputs = [PartialTxOutput.from_address_and_value(bip21_address, amount)]
                     except InvoiceError as e:
                         self.logger.debug(self._get_error_from_invoiceerror(e))
+                elif not self.bip21.get('address'):
+                    # no address and no bolt11, invalid
+                    self.set_state(PaymentIdentifierState.INVALID)
+                    return
                 self.set_state(PaymentIdentifierState.AVAILABLE)
         elif self.parse_output(text)[0]:
             scriptpubkey, is_address = self.parse_output(text)
@@ -320,7 +324,7 @@ class PaymentIdentifier(Logger):
                             'security check, DNSSEC, and thus may not be correct.').format(key)
                     try:
                         assert bitcoin.is_address(address)
-                        scriptpubkey = bytes.fromhex(bitcoin.address_to_script(address))
+                        scriptpubkey = bitcoin.address_to_script(address)
                         self._type = PaymentIdentifierType.OPENALIAS
                         self.spk = scriptpubkey
                         self.set_state(PaymentIdentifierState.AVAILABLE)
@@ -504,7 +508,7 @@ class PaymentIdentifier(Logger):
         self.logger.debug(f'multiline: {outputs!r}, {self.error}')
         return outputs
 
-    def parse_address_and_amount(self, line: str) -> 'PartialTxOutput':
+    def parse_address_and_amount(self, line: str) -> PartialTxOutput:
         try:
             x, y = line.split(',')
         except ValueError:
@@ -515,23 +519,23 @@ class PaymentIdentifier(Logger):
         amount = self.parse_amount(y)
         return PartialTxOutput(scriptpubkey=scriptpubkey, value=amount)
 
-    def parse_output(self, x: str) -> Tuple[bytes, bool]:
+    def parse_output(self, x: str) -> Tuple[Optional[bytes], bool]:
         try:
             address = self.parse_address(x)
-            return bytes.fromhex(bitcoin.address_to_script(address)), True
+            return bitcoin.address_to_script(address), True
         except Exception as e:
             pass
         try:
             m = re.match('^' + RE_SCRIPT_FN + '$', x)
             script = self.parse_script(str(m.group(1)))
-            return bytes.fromhex(script), False
+            return script, False
         except Exception as e:
             pass
 
         return None, False
 
-    def parse_script(self, x: str):
-        script = ''
+    def parse_script(self, x: str) -> bytes:
+        script = bytearray()
         for word in x.split():
             if word[0:3] == 'OP_':
                 opcode_int = opcodes[word]
@@ -539,9 +543,9 @@ class PaymentIdentifier(Logger):
             else:
                 bytes.fromhex(word)  # to test it is hex data
                 script += construct_script([word])
-        return script
+        return bytes(script)
 
-    def parse_amount(self, x: str):
+    def parse_amount(self, x: str) -> Union[str, int]:
         x = x.strip()
         if not x:
             raise Exception("Amount is empty")
@@ -652,7 +656,7 @@ class PaymentIdentifier(Logger):
         if parts and len(parts) > 0 and bitcoin.is_address(parts[0]):
             return None
         try:
-            data = self.contacts.resolve(key) # TODO: don't use contacts as delegate to resolve openalias, separate.
+            data = self.contacts.resolve(key)  # TODO: don't use contacts as delegate to resolve openalias, separate.
             return data
         except AliasNotFoundException as e:
             self.logger.info(f'OpenAlias not found: {repr(e)}')
@@ -662,7 +666,7 @@ class PaymentIdentifier(Logger):
             return None
 
     def has_expired(self):
-        if self.bip70:
+        if self.bip70 and self.bip70_data:
             return self.bip70_data.has_expired()
         elif self.bolt11:
             return self.bolt11.has_expired()
@@ -675,11 +679,13 @@ class PaymentIdentifier(Logger):
 def invoice_from_payment_identifier(
     pi: 'PaymentIdentifier',
     wallet: 'Abstract_Wallet',
-    amount_sat: int,
+    amount_sat: Union[int, str],
     message: str = None
 ) -> Optional[Invoice]:
     assert pi.state in [PaymentIdentifierState.AVAILABLE, PaymentIdentifierState.MERCHANT_NOTIFY]
-    if pi.is_lightning():
+    assert pi.is_onchain() if amount_sat == '!' else True  # MAX should only be allowed if pi has onchain destination
+
+    if pi.is_lightning() and not amount_sat == '!':
         invoice = pi.bolt11
         if not invoice:
             return

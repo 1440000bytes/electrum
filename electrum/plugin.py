@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 #
 # Electrum - lightweight Bitcoin client
-# Copyright (C) 2015 Thomas Voegtlin
+# Copyright (C) 2015-2024 Thomas Voegtlin
 #
 # Permission is hereby granted, free of charge, to any person
 # obtaining a copy of this software and associated documentation files
@@ -22,15 +22,20 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+
 import os
 import pkgutil
 import importlib.util
 import time
 import threading
+import traceback
 import sys
+import aiohttp
+
 from typing import (NamedTuple, Any, Union, TYPE_CHECKING, Optional, Tuple,
-                    Dict, Iterable, List, Sequence, Callable, TypeVar, Mapping, Set)
+                    Dict, Iterable, List, Sequence, Callable, TypeVar, Mapping)
 import concurrent
+import zipimport
 from concurrent import futures
 from functools import wraps, partial
 
@@ -40,6 +45,7 @@ from . import bip32
 from . import plugins
 from .simple_config import SimpleConfig
 from .logging import get_logger, Logger
+from .crypto import sha256
 
 if TYPE_CHECKING:
     from .plugins.hw_wallet import HW_PluginBase, HardwareClientBase, HardwareHandlerBase
@@ -57,7 +63,6 @@ class Plugins(DaemonThread):
 
     LOGGING_SHORTCUT = 'p'
     pkgpath = os.path.dirname(plugins.__file__)
-    _all_found_plugins = None  # type: Optional[Dict[str, dict]]
 
     @profiler
     def __init__(self, config: SimpleConfig, gui_name):
@@ -66,40 +71,39 @@ class Plugins(DaemonThread):
         self.config = config
         self.hw_wallets = {}
         self.plugins = {}  # type: Dict[str, BasePlugin]
+        self.internal_plugin_metadata = {}
+        self.external_plugin_metadata = {}
         self.gui_name = gui_name
-        self.descriptions = {}
         self.device_manager = DeviceMgr(config)
+        self.find_internal_plugins()
+        self.find_external_plugins()
         self.load_plugins()
         self.add_jobs(self.device_manager.thread_jobs())
         self.start()
 
-    @classmethod
-    def find_all_plugins(cls) -> Mapping[str, dict]:
-        """Return a map of all found plugins: name -> description.
-        Note that plugins not available for the current GUI are also included.
-        """
-        if cls._all_found_plugins is None:
-            cls._all_found_plugins = dict()
-            for loader, name, ispkg in pkgutil.iter_modules([cls.pkgpath]):
-                full_name = f'electrum.plugins.{name}'
-                spec = importlib.util.find_spec(full_name)
-                if spec is None:  # pkgutil found it but importlib can't ?!
-                    raise Exception(f"Error pre-loading {full_name}: no spec")
-                try:
-                    module = importlib.util.module_from_spec(spec)
-                    # sys.modules needs to be modified for relative imports to work
-                    # see https://stackoverflow.com/a/50395128
-                    sys.modules[spec.name] = module
-                    spec.loader.exec_module(module)
-                except Exception as e:
-                    raise Exception(f"Error pre-loading {full_name}: {repr(e)}") from e
-                d = module.__dict__
-                assert name not in cls._all_found_plugins
-                cls._all_found_plugins[name] = d
-        return cls._all_found_plugins
+    @property
+    def descriptions(self):
+        return dict(list(self.internal_plugin_metadata.items()) + list(self.external_plugin_metadata.items()))
 
-    def load_plugins(self):
-        for name, d in self.find_all_plugins().items():
+    def find_internal_plugins(self):
+        """Populates self.internal_plugin_metadata
+        """
+        iter_modules = list(pkgutil.iter_modules([self.pkgpath]))
+        for loader, name, ispkg in iter_modules:
+            # FIXME pyinstaller binaries are packaging each built-in plugin twice:
+            #       once as data and once as code. To honor the "no duplicates" rule below,
+            #       we exclude the ones packaged as *code*, here:
+            if loader.__class__.__qualname__ == "PyiFrozenImporter":
+                continue
+            full_name = f'electrum.plugins.{name}'
+            spec = importlib.util.find_spec(full_name)
+            if spec is None:  # pkgutil found it but importlib can't ?!
+                raise Exception(f"Error pre-loading {full_name}: no spec")
+            module = self.exec_module_from_spec(spec, full_name)
+            d = module.__dict__
+            if 'fullname' not in d:
+                continue
+            d['display_name'] = d['fullname']
             gui_good = self.gui_name in d.get('available_for', [])
             if not gui_good:
                 continue
@@ -109,12 +113,120 @@ class Plugins(DaemonThread):
             details = d.get('registers_keystore')
             if details:
                 self.register_keystore(name, gui_good, details)
-            self.descriptions[name] = d
-            if not d.get('requires_wallet_type') and self.config.get('use_' + name):
+            if d.get('requires_wallet_type'):
+                # trustedcoin will not be added to list
+                continue
+            if name in self.internal_plugin_metadata:
+                _logger.info(f"Found the following plugin modules: {iter_modules=}")
+                raise Exception(f"duplicate plugins? for {name=}")
+            self.internal_plugin_metadata[name] = d
+
+    def exec_module_from_spec(self, spec, path):
+        try:
+            module = importlib.util.module_from_spec(spec)
+            # sys.modules needs to be modified for relative imports to work
+            # see https://stackoverflow.com/a/50395128
+            sys.modules[path] = module
+            spec.loader.exec_module(module)
+        except Exception as e:
+            raise Exception(f"Error pre-loading {path}: {repr(e)}") from e
+        return module
+
+    def load_plugins(self):
+        self.load_internal_plugins()
+        self.load_external_plugins()
+
+    def load_internal_plugins(self):
+        for name, d in self.internal_plugin_metadata.items():
+            if not d.get('requires_wallet_type') and self.config.get('enable_plugin_' + name):
                 try:
-                    self.load_plugin(name)
+                    self.load_internal_plugin(name)
                 except BaseException as e:
                     self.logger.exception(f"cannot initialize plugin {name}: {e}")
+
+    def load_external_plugin(self, name):
+        if name in self.plugins:
+            return self.plugins[name]
+        # If we do not have the metadata, it was not detected by `load_external_plugins`
+        # on startup, or added by manual user installation after that point.
+        metadata = self.external_plugin_metadata.get(name)
+        if metadata is None:
+            self.logger.exception(f"attempted to load unknown external plugin {name}")
+            return
+        full_name = f'electrum_external_plugins.{name}.{self.gui_name}'
+        spec = importlib.util.find_spec(full_name)
+        if spec is None:
+            raise RuntimeError(f"{self.gui_name} implementation for {name} plugin not found")
+        module = self.exec_module_from_spec(spec, full_name)
+        plugin = module.Plugin(self, self.config, name)
+        self.add_jobs(plugin.thread_jobs())
+        self.plugins[name] = plugin
+        self.logger.info(f"loaded external plugin {name}")
+        return plugin
+
+    def _has_root_permissions(self, path):
+        return os.stat(path).st_uid == 0 and not os.access(path, os.W_OK)
+
+    def get_external_plugin_dir(self):
+        if sys.platform not in ['linux', 'darwin'] and not sys.platform.startswith('freebsd'):
+            return
+        pkg_path = '/opt/electrum_plugins'
+        if not os.path.exists(pkg_path):
+            self.logger.info(f'direcctory {pkg_path} does not exist')
+            return
+        if not self._has_root_permissions(pkg_path):
+            self.logger.info(f'not loading {pkg_path}: directory has user write permissions')
+            return
+        return pkg_path
+
+    def external_plugin_path(self, name):
+        metadata = self.external_plugin_metadata[name]
+        filename = metadata['filename']
+        return os.path.join(self.get_external_plugin_dir(), filename)
+
+    def find_external_plugins(self):
+        pkg_path = self.get_external_plugin_dir()
+        if pkg_path is None:
+            return
+        for filename in os.listdir(pkg_path):
+            path = os.path.join(pkg_path, filename)
+            if not self._has_root_permissions(path):
+                self.logger.info(f'not loading {path}: file has user write permissions')
+                continue
+            try:
+                zipfile = zipimport.zipimporter(path)
+            except zipimport.ZipImportError:
+                self.logger.exception(f"unable to load zip plugin '{filename}'")
+                continue
+            for name, b in pkgutil.iter_zipimport_modules(zipfile):
+                if b is False:
+                    continue
+                if name in self.internal_plugin_metadata:
+                    raise Exception(f"duplicate plugins for name={name}")
+                if name in self.external_plugin_metadata:
+                    raise Exception(f"duplicate plugins for name={name}")
+                module_path = f'electrum_external_plugins.{name}'
+                spec = zipfile.find_spec(name)
+                module = self.exec_module_from_spec(spec, module_path)
+                d = module.__dict__
+                gui_good = self.gui_name in d.get('available_for', [])
+                if not gui_good:
+                    continue
+                d['filename'] = filename
+                if 'fullname' not in d:
+                    continue
+                d['display_name'] = d['fullname']
+                d['zip_hash_sha256'] = get_file_hash256(path)
+                self.external_plugin_metadata[name] = d
+
+    def load_external_plugins(self):
+        for name, d in self.external_plugin_metadata.items():
+            if self.config.get('enable_plugin_' + name):
+                try:
+                    self.load_external_plugin(name)
+                except BaseException as e:
+                    traceback.print_exc(file=sys.stdout)  # shouldn't this be... suppressed unless -v?
+                    self.logger.exception(f"cannot initialize plugin {name} {e!r}")
 
     def get(self, name):
         return self.plugins.get(name)
@@ -123,13 +235,23 @@ class Plugins(DaemonThread):
         return len(self.plugins)
 
     def load_plugin(self, name) -> 'BasePlugin':
+        """Imports the code of the given plugin.
+        note: can be called from any thread.
+        """
+        if name in self.internal_plugin_metadata:
+            return self.load_internal_plugin(name)
+        elif name in self.external_plugin_metadata:
+            return self.load_external_plugin(name)
+        else:
+            raise Exception(f"could not find plugin {name!r}")
+
+    def load_internal_plugin(self, name) -> 'BasePlugin':
         if name in self.plugins:
             return self.plugins[name]
         full_name = f'electrum.plugins.{name}.{self.gui_name}'
         spec = importlib.util.find_spec(full_name)
         if spec is None:
-            raise RuntimeError("%s implementation for %s plugin not found"
-                               % (self.gui_name, name))
+            raise RuntimeError(f"{self.gui_name} implementation for {name} plugin not found")
         try:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -138,21 +260,21 @@ class Plugins(DaemonThread):
             raise Exception(f"Error loading {name} plugin: {repr(e)}") from e
         self.add_jobs(plugin.thread_jobs())
         self.plugins[name] = plugin
-        self.logger.info(f"loaded {name}")
+        self.logger.info(f"loaded plugin {name!r}. (from thread: {threading.current_thread().name!r})")
         return plugin
 
     def close_plugin(self, plugin):
         self.remove_jobs(plugin.thread_jobs())
 
     def enable(self, name: str) -> 'BasePlugin':
-        self.config.set_key('use_' + name, True, save=True)
+        self.config.set_key('enable_plugin_' + name, True, save=True)
         p = self.get(name)
         if p:
             return p
         return self.load_plugin(name)
 
     def disable(self, name: str) -> None:
-        self.config.set_key('use_' + name, False, save=True)
+        self.config.set_key('enable_plugin_' + name, False, save=True)
         p = self.get(name)
         if not p:
             return
@@ -162,12 +284,7 @@ class Plugins(DaemonThread):
 
     @classmethod
     def is_plugin_enabler_config_key(cls, key: str) -> bool:
-        if not key.startswith('use_'):
-            return False
-        # note: the 'use_' prefix is not sufficient to check, there are
-        #       non-plugin-related config keys that also have it... hence:
-        name = key[4:]
-        return name in cls.find_all_plugins()
+        return key.startswith('enable_plugin_')
 
     def toggle(self, name: str) -> Optional['BasePlugin']:
         p = self.get(name)
@@ -193,7 +310,7 @@ class Plugins(DaemonThread):
             if gui_good:
                 try:
                     p = self.get_plugin(name)
-                    if p.is_enabled():
+                    if p.is_available():
                         out.append(HardwarePluginToScan(name=name,
                                                         description=details[2],
                                                         plugin=p,
@@ -209,6 +326,7 @@ class Plugins(DaemonThread):
     def register_wallet_type(self, name, gui_good, wallet_type):
         from .wallet import register_wallet_type, register_constructor
         self.logger.info(f"registering wallet type {(wallet_type, name)}")
+
         def loader():
             plugin = self.get_plugin(name)
             register_constructor(wallet_type, plugin.wallet_class)
@@ -217,6 +335,7 @@ class Plugins(DaemonThread):
 
     def register_keystore(self, name, gui_good, details):
         from .keystore import register_keystore
+
         def dynamic_constructor(d):
             return self.get_plugin(name).keystore_class(d)
         if details[0] == 'hardware':
@@ -235,6 +354,10 @@ class Plugins(DaemonThread):
             self.run_jobs()
         self.on_stop()
 
+def get_file_hash256(path: str) -> str:
+    '''Get the sha256 hash of a file in hex, similar to `sha256sum`.'''
+    with open(path, 'rb') as f:
+        return sha256(f.read()).hex()
 
 def hook(func):
     hook_names.add(func.__name__)
@@ -265,7 +388,7 @@ class BasePlugin(Logger):
         self.parent = parent  # type: Plugins  # The plugins object
         self.name = name
         self.config = config
-        self.wallet = None
+        self.wallet = None  # fixme: this field should not exist
         Logger.__init__(self)
         # add self to hooks
         for k in dir(self):
@@ -302,7 +425,7 @@ class BasePlugin(Logger):
         return []
 
     def is_enabled(self):
-        return self.is_available() and self.config.get('use_'+self.name) is True
+        return self.is_available() and self.config.get('enable_plugin_' + self.name) is True
 
     def is_available(self):
         return True
@@ -315,6 +438,18 @@ class BasePlugin(Logger):
 
     def settings_dialog(self, window):
         raise NotImplementedError()
+
+    def read_file(self, filename: str) -> bytes:
+        import zipfile
+        if self.name in self.parent.external_plugin_metadata:
+            plugin_filename = self.parent.external_plugin_path(self.name)
+            with zipfile.ZipFile(plugin_filename) as myzip:
+                with myzip.open(os.path.join(self.name, filename)) as myfile:
+                    return myfile.read()
+        else:
+            path = os.path.join(os.path.dirname(__file__), 'plugins', self.name, filename)
+            with open(path, 'rb') as myfile:
+                return myfile.read()
 
 
 class DeviceUnpairableError(UserFacingException): pass
@@ -366,6 +501,16 @@ _hwd_comms_executor = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix='hwd_comms_thread'
 )
 
+# hidapi needs to be imported from the main thread. Otherwise, at least on macOS,
+# segfaults will follow. (see https://github.com/trezor/cython-hidapi/pull/150#issuecomment-1542391087)
+# To keep it simple, let's just import it now, as we are likely in the main thread here.
+if threading.current_thread() is not threading.main_thread():
+    _logger.warning("expected to be in main thread... hidapi will not be safe to use now!")
+try:
+    import hid
+except ImportError:
+    pass
+
 
 T = TypeVar('T')
 
@@ -392,7 +537,7 @@ def assert_runs_in_hwd_thread():
 
 
 class DeviceMgr(ThreadJob):
-    '''Manages hardware clients.  A client communicates over a hardware
+    """Manages hardware clients.  A client communicates over a hardware
     channel with the device.
 
     In addition to tracking device HID IDs, the device manager tracks
@@ -420,7 +565,7 @@ class DeviceMgr(ThreadJob):
     the HID IDs.
 
     This plugin is thread-safe.  Currently only devices supported by
-    hidapi are implemented.'''
+    hidapi are implemented."""
 
     def __init__(self, config: SimpleConfig):
         ThreadJob.__init__(self)
@@ -532,7 +677,7 @@ class DeviceMgr(ThreadJob):
                             allow_user_interaction: bool = True) -> Optional['HardwareClientBase']:
         self.logger.info("getting client for keystore")
         if handler is None:
-            raise Exception(_("Handler not found for") + ' ' + plugin.name + '\n' + _("A library is probably missing."))
+            raise Exception(_("Handler not found for {}").format(plugin.name) + '\n' + _("A library is probably missing."))
         handler.update_status(False)
         pcode = keystore.pairing_code()
         client = None
@@ -597,7 +742,7 @@ class DeviceMgr(ThreadJob):
             try:
                 client_xpub = client.get_xpub(derivation, xtype)
             except (UserCancelled, RuntimeError):
-                 # Bad / cancelled PIN / passphrase
+                # Bad / cancelled PIN / passphrase
                 client_xpub = None
             if client_xpub == xpub:
                 keystore.opportunistically_fill_in_missing_info_from_device(client)
@@ -769,8 +914,7 @@ class DeviceMgr(ThreadJob):
             try:
                 new_devices = f()
             except BaseException as e:
-                self.logger.error('custom device enum failed. func {}, error {}'
-                                  .format(str(f), repr(e)))
+                self.logger.error(f'custom device enum failed. func {str(f)}, error {e!r}')
             else:
                 devices.extend(new_devices)
 
